@@ -45,19 +45,30 @@ export const containerApi = {
     });
     if (!response.ok) throw new Error("Failed to stop project");
   },
-  restartProject: async (projectName: string): Promise<{ stopped: number; started: number; errors?: string[] }> => {
-    const response = await fetch(`${API_BASE}/projects/${projectName}/restart`, { method: 'POST' });
-    if (!response.ok) throw new Error('Failed to restart project');
+  restartProject: async (
+    projectName: string
+  ): Promise<{ stopped: number; started: number; errors?: string[] }> => {
+    const response = await fetch(
+      `${API_BASE}/projects/${projectName}/restart`,
+      { method: "POST" }
+    );
+    if (!response.ok) throw new Error("Failed to restart project");
     return response.json();
   },
 
-  rebuildProject: async (projectName: string, path?: string): Promise<{ returncode: number; stdout: string; stderr: string }> => {
-    const response = await fetch(`${API_BASE}/projects/${projectName}/rebuild`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
-    if (!response.ok) throw new Error('Failed to rebuild project');
+  rebuildProject: async (
+    projectName: string,
+    path?: string
+  ): Promise<{ returncode: number; stdout: string; stderr: string }> => {
+    const response = await fetch(
+      `${API_BASE}/projects/${projectName}/rebuild`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      }
+    );
+    if (!response.ok) throw new Error("Failed to rebuild project");
     return response.json();
   },
 };

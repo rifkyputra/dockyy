@@ -53,7 +53,8 @@ export const useStopProject = () => {
 export const useRestartProject = () => {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (projectName: string) => containerApi.restartProject(projectName),
+    mutationFn: (projectName: string) =>
+      containerApi.restartProject(projectName),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["containers"] });
     },
@@ -63,8 +64,13 @@ export const useRestartProject = () => {
 export const useRebuildProject = () => {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ projectName, path }: { projectName: string; path?: string }) =>
-      containerApi.rebuildProject(projectName, path),
+    mutationFn: ({
+      projectName,
+      path,
+    }: {
+      projectName: string;
+      path?: string;
+    }) => containerApi.rebuildProject(projectName, path),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["containers"] });
     },
