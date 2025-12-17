@@ -23,21 +23,25 @@ A modern Docker dashboard application with a React frontend and Flask backend.
    cd backend
    ```
 
-2. Create a virtual environment and install dependencies using UV:
+2. Install dependencies using UV:
    ```bash
-   uv venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   uv pip install -e ".[dev]"
+   uv sync
    ```
 
-3. Copy the environment file:
+3. Copy the environment file and configure:
    ```bash
    cp .env.example .env
+   # Edit .env with your Turso database credentials
    ```
 
-4. Run the Flask server:
+4. Run database migrations:
    ```bash
-   python -m app
+   python migrate.py upgrade
+   ```
+
+5. Run the Flask server:
+   ```bash
+   uv run python -m app
    ```
 
 The backend will be available at `http://localhost:8012`
@@ -64,14 +68,44 @@ The frontend will be available at `http://localhost:3000`
 ## Features
 
 - 📊 View all Docker containers
+- �️ Manage GitHub repositories
 - 🔄 Real-time container status
-- 🎨 Modern, responsive UI
+- 🎨 Modern, responsive UI with DaisyUI
 - 🚀 Fast development with Bun and Vite
+- 🗄️ Database migrations with Alembic
 
 ## API Endpoints
 
+### Health & Containers
 - `GET /api/health` - Health check
 - `GET /api/containers` - List all containers
+
+### Repositories
+- `GET /api/repositories` - List all repositories
+- `GET /api/repositories/:id` - Get repository details
+- `POST /api/repositories` - Create new repository
+- `PUT /api/repositories/:id` - Update repository
+- `DELETE /api/repositories/:id` - Delete repository
+
+## Database Migrations
+
+This project uses Alembic for database schema management. See [backend/migrations/README.md](backend/migrations/README.md) for detailed documentation.
+
+### Common Migration Commands
+
+```bash
+# Apply all pending migrations
+python migrate.py upgrade
+
+# Create new migration after model changes
+python migrate.py autogenerate -m "Description of changes"
+
+# Check current migration version
+python migrate.py current
+
+# View migration history
+python migrate.py history
+```
 
 ## Development
 

@@ -8,6 +8,8 @@ dependencies = [
   "flask-cors>=4.0.0",
   "docker>=7.0.0",
   "python-dotenv>=1.0.0",
+  "sqlalchemy-libsql>=0.2.0",
+  "alembic>=1.17.2",
 ]
 
 [project.optional-dependencies]

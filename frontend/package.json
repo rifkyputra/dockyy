@@ -10,16 +10,22 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/react-query": "^5.90.12",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.23.0"
+    "react-router-dom": "^6.23.0",
+    "tailwindcss": "^4.1.18"
   },
   "devDependencies": {
+    "@types/node": "^25.0.3",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
-    "vite": "^5.2.0",
+    "daisyui": "^5.5.14",
     "eslint": "^8.57.0",
-    "eslint-plugin-react": "^7.34.0"
+    "eslint-plugin-react": "^7.34.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.2.0"
   }
 }
