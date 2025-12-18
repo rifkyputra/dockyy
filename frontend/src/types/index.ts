@@ -31,6 +31,17 @@ export interface CreateRepositoryInput {
   default_branch?: string;
 }
 
+export interface CreateRepositoryInput {
+  name: string;
+  owner: string;
+  url: string;
+  description?: string;
+  webhook_url?: string;
+  filesystem_path?: string;
+  is_private?: boolean;
+  default_branch?: string;
+}
+
 export interface UpdateRepositoryInput {
   name?: string;
   owner?: string;
@@ -40,4 +51,12 @@ export interface UpdateRepositoryInput {
   filesystem_path?: string;
   is_private?: boolean;
   default_branch?: string;
+}
+
+export interface DockerComposeFile {
+  id: string;
+  name: string;
+  path: string;
+  status: "running" | "stopped" | "error";
+  content: string;
 }

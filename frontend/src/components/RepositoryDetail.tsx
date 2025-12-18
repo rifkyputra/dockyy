@@ -10,11 +10,13 @@ import {
   useRebuildProject,
   useContainers,
   useRepositoryComposeFile,
+  useComposeFiles,
 } from "@/hooks/useApi";
 import { UpdateRepositoryInput } from "@/types";
 import { useState, useEffect } from "react";
 import GitControls from "./GitControls";
 import ReadmeSection from "./ReadmeSection";
+import DockerComposeList from "./DockerComposeList";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -35,6 +37,8 @@ const RepositoryDetail = () => {
     isLoading: composeLoading,
     error: composeError,
   } = useRepositoryComposeFile(repoId);
+
+  const { data: composeFiles } = useComposeFiles(repoId);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<UpdateRepositoryInput>({});
@@ -480,6 +484,10 @@ const RepositoryDetail = () => {
           </div>
         )}
       </div>
+
+      {filesystemStatus?.has_docker_compose && composeFiles && (
+        <DockerComposeList composeFiles={composeFiles} />
+      )}
 
       {filesystemStatus?.has_docker_compose && (
         <div className="card bg-base-100 shadow-md">

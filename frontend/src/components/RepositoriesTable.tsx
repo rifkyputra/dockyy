@@ -262,7 +262,6 @@ const RepositoriesTable = () => {
                 <tr>
                   <th>Name</th>
                   <th>Owner</th>
-                  <th>URL</th>
                   <th>Path</th>
                   <th>Branch</th>
                   <th>Private</th>
@@ -286,16 +285,7 @@ const RepositoriesTable = () => {
                       )}
                     </td>
                     <td>{repo.owner}</td>
-                    <td>
-                      <a
-                        href={repo.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="link link-primary"
-                      >
-                        View →
-                      </a>
-                    </td>
+
                     <td>
                       {repo.filesystem_path ? (
                         <code className="text-xs">{repo.filesystem_path}</code>

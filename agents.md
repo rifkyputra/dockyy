@@ -7,6 +7,8 @@ desc: docker dashboard
 
 ## Architecture
 
+REST API.
+
 ### FE
 
 use typescript

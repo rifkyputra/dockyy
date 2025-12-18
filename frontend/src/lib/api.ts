@@ -3,6 +3,7 @@ import type {
   Repository,
   CreateRepositoryInput,
   UpdateRepositoryInput,
+  DockerComposeFile,
 } from "../types";
 
 const API_BASE = "/api";
@@ -133,6 +134,18 @@ export const repositoryApi = {
     if (!response.ok) throw new Error("Failed to get compose file");
     return response.json();
   },
+
+  getComposeFiles: async (id: number): Promise<DockerComposeFile[]> => {
+    const response = await fetch(
+      `${API_BASE}/repositories/${id}/compose-files`,
+      {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+    if (!response.ok) throw new Error("Failed to scan for compose files");
+    return response.json();
+  },
   // Git operations
   gitStatus: async (
     id: number
@@ -175,6 +188,19 @@ export const readmeApi = {
       body: JSON.stringify({ path }),
     });
     if (!response.ok) throw new Error("Failed to fetch README");
+    return response.json();
+  },
+};
+
+// Tunnel API
+export const tunnelApi = {
+  checkCloudflared: async (): Promise<{
+    installed: boolean;
+    version?: string;
+    error?: string;
+  }> => {
+    const response = await fetch(`${API_BASE}/tunnels/cloudflared/status`);
+    if (!response.ok) throw new Error("Failed to check cloudflared status");
     return response.json();
   },
 };

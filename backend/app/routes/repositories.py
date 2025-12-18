@@ -5,40 +5,17 @@ from app.models import Repository
 from datetime import datetime
 import logging
 import os
-import subprocess
+import docker
+from app.services.git_service import (
+    check_git_repo,
+    run_git_cmd,
+    parse_unified_diff,
+)
+from app.services.compose_service import check_docker_compose
 
 logger = logging.getLogger(__name__)
 
-def check_git_repo(path: str) -> bool:
-    """Check if the given path contains a git repository"""
-    if not path or not os.path.exists(path):
-        return False
-    
-    try:
-        # Check if .git directory exists
-        git_dir = os.path.join(path, '.git')
-        if os.path.isdir(git_dir):
-            return True
-        
-        # Also check if git command recognizes it as a repo
-        result = subprocess.run(
-            ['git', 'rev-parse', '--git-dir'],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
-        return False
 
-def check_docker_compose(path: str) -> bool:
-    """Check if the given path contains docker-compose files"""
-    if not path or not os.path.exists(path):
-        return False
-    
-    compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
-    return any(os.path.isfile(os.path.join(path, file)) for file in compose_files)
 
 repositories_bp = Blueprint('repositories', __name__)
 
@@ -280,9 +257,9 @@ def init_routes(app, db_engine):
             logger.error(f"Error checking filesystem status for repository {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
 
-    @repositories_bp.route('/api/repositories/<int:repo_id>/compose-file', methods=['GET'])
-    def get_repository_compose_file(repo_id):
-        """Return docker-compose file content for a repository if present"""
+    @repositories_bp.route('/api/repositories/<int:repo_id>/compose-files', methods=['GET'])
+    def get_repository_compose_files(repo_id):
+        """Return a list of docker-compose files with content and status (DockerComposeFile[])"""
         try:
             session = Session(db_engine)
             stmt = select(Repository).where(Repository.id == repo_id)
@@ -297,7 +274,84 @@ def init_routes(app, db_engine):
                 session.close()
                 return jsonify({'error': 'Filesystem path not found'}), 404
 
-            # Look for common compose filenames
+            possible_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+            found_files = []
+
+            for root, dirs, files in os.walk(filesystem_path):
+                for candidate in possible_files:
+                    if candidate in files:
+                        full_path = os.path.join(root, candidate)
+                        found_files.append(full_path)
+
+            # Try to init docker client for status calculation
+            docker_client = None
+            try:
+                docker_client = docker.from_env()
+            except Exception as e:
+                logger.warning(f"Docker client unavailable when listing compose files: {e}")
+
+            result = []
+            for full_path in found_files:
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as fh:
+                        content = fh.read()
+                except Exception as e:
+                    logger.error(f"Failed reading compose file {full_path}: {e}")
+                    content = ''
+
+                name = os.path.basename(full_path)
+                # Heuristic project name: folder name containing the compose file
+                project_name = os.path.basename(os.path.dirname(full_path))
+
+                status = 'stopped'
+                if docker_client:
+                    try:
+                        containers = docker_client.containers.list(
+                            all=True,
+                            filters={'label': f'com.docker.compose.project={project_name}'}
+                        )
+                        if any(c.status == 'running' for c in containers):
+                            status = 'running'
+                        elif containers:
+                            status = 'stopped'
+                        else:
+                            status = 'stopped'
+                    except Exception as e:
+                        logger.warning(f"Error checking docker status for project {project_name}: {e}")
+                        status = 'error'
+
+                result.append({
+                    'id': full_path,  # unique enough for UI; path as id
+                    'name': name,
+                    'path': full_path,
+                    'status': status,
+                    'content': content,
+                })
+
+            session.close()
+            return jsonify(result), 200
+        except Exception as e:
+            logger.error(f"Error listing compose files for repository {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @repositories_bp.route('/api/repositories/<int:repo_id>/compose-file', methods=['GET'])
+    def get_repository_compose_file(repo_id):
+        """Return first docker-compose file content for a repository if present"""
+        try:
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+
+            filesystem_path = repo.filesystem_path
+            if not filesystem_path or not os.path.exists(filesystem_path):
+                session.close()
+                return jsonify({'error': 'Filesystem path not found'}), 404
+
+            # Look for common compose filenames in root first
             compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
             found = None
             for f in compose_files:
@@ -305,6 +359,16 @@ def init_routes(app, db_engine):
                 if os.path.isfile(candidate):
                     found = candidate
                     break
+
+            # If not found in root, search recursively and pick first
+            if not found:
+                for root, dirs, files in os.walk(filesystem_path):
+                    for f in compose_files:
+                        if f in files:
+                            found = os.path.join(root, f)
+                            break
+                    if found:
+                        break
 
             if not found:
                 session.close()
@@ -319,101 +383,7 @@ def init_routes(app, db_engine):
             logger.error(f"Error reading compose file for repository {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
 
-    def run_git_cmd(path: str, args: list, timeout: int = 30):
-        try:
-            result = subprocess.run(
-                ['git', *args],
-                cwd=path,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return {
-                'returncode': result.returncode,
-                'stdout': result.stdout,
-                'stderr': result.stderr,
-            }
-        except subprocess.TimeoutExpired as e:
-            return {'returncode': 124, 'stdout': '', 'stderr': f'Timeout: {e}'}
-        except Exception as e:
-            return {'returncode': 1, 'stdout': '', 'stderr': str(e)}
-
-    def parse_unified_diff(diff_text: str):
-        """Parse unified diff output into structured JSON with hunks and line changes."""
-        import re
-
-        files = []
-        cur = None
-        hunk_re = re.compile(r"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@")
-
-        lines = diff_text.splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if line.startswith('diff --git'):
-                # start new file
-                if cur:
-                    files.append(cur)
-                cur = {'from': None, 'to': None, 'hunks': []}
-                i += 1
-                continue
-
-            if cur is not None and line.startswith('--- '):
-                cur['from'] = line[4:].strip()
-                i += 1
-                continue
-
-            if cur is not None and line.startswith('+++ '):
-                cur['to'] = line[4:].strip()
-                i += 1
-                continue
-
-            m = hunk_re.match(line)
-            if cur is not None and m:
-                old_start = int(m.group(1))
-                old_count = int(m.group(2)) if m.group(2) else 1
-                new_start = int(m.group(3))
-                new_count = int(m.group(4)) if m.group(4) else 1
-
-                hunk = {
-                    'old_start': old_start,
-                    'old_count': old_count,
-                    'new_start': new_start,
-                    'new_count': new_count,
-                    'changes': [],
-                }
-
-                # consume hunk lines
-                i += 1
-                old_line = old_start
-                new_line = new_start
-                while i < len(lines):
-                    l = lines[i]
-                    if l.startswith('diff --git') or l.startswith('@@ '):
-                        # do not consume this line here
-                        break
-                    if l.startswith('+') and not l.startswith('+++'):
-                        hunk['changes'].append({'type': 'add', 'line': new_line, 'content': l[1:]})
-                        new_line += 1
-                    elif l.startswith('-') and not l.startswith('---'):
-                        hunk['changes'].append({'type': 'del', 'line': old_line, 'content': l[1:]})
-                        old_line += 1
-                    else:
-                        # context line
-                        if l.startswith(' '):
-                            old_line += 1
-                            new_line += 1
-                    i += 1
-
-                cur['hunks'].append(hunk)
-                continue
-
-            i += 1
-
-        if cur:
-            files.append(cur)
-
-        return files
+    
 
     @repositories_bp.route('/api/repositories/<int:repo_id>/git/status', methods=['GET'])
     def git_status(repo_id):
@@ -524,6 +494,37 @@ def init_routes(app, db_engine):
             return jsonify(res), 200
         except Exception as e:
             logger.error(f"Error running git log for {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+        
+    @repositories_bp.route('/api/repositories/<int:repo_id>/docker-compose', methods=['GET'])
+    def repository_scan_compose_files(repo_id):
+        """Scan all docker-compose files in the repository's filesystem path"""
+        try:
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+            
+            filesystem_path = repo.filesystem_path
+            if not filesystem_path or not os.path.exists(filesystem_path):
+                session.close()
+                return jsonify({'error': 'Filesystem path not found'}), 404
+
+            compose_files = []
+            possible_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
+            for root, dirs, files in os.walk(filesystem_path):
+                for f in possible_files:
+                    if f in files:
+                        full_path = os.path.join(root, f)
+                        compose_files.append(full_path)
+
+            session.close()
+            return jsonify({'compose_files': compose_files}), 200
+        except Exception as e:
+            logger.error(f"Error scanning compose files for repository {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
         
     @repositories_bp.route('/api/repositories/<int:repo_id>/readme', methods=['POST'])

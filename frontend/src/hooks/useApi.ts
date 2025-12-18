@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { containerApi, repositoryApi, readmeApi } from "../lib/api";
+import { containerApi, repositoryApi, readmeApi, tunnelApi } from "../lib/api";
 import type { CreateRepositoryInput, UpdateRepositoryInput } from "../types";
 
 // Container hooks
@@ -140,11 +140,27 @@ export const useRepositoryComposeFile = (id: number) => {
   });
 };
 
+export const useComposeFiles = (id: number) => {
+  return useQuery({
+    queryKey: ["repositories", id, "compose-files"],
+    queryFn: () => repositoryApi.getComposeFiles(id),
+    enabled: !!id,
+  });
+};
+
 // README hook
 export const useReadme = (id: number, path?: string) => {
   return useQuery({
     queryKey: ["readme", id, path],
     queryFn: () => readmeApi.post(id, path),
     enabled: !!id,
+  });
+};
+
+// Tunnel hooks
+export const useCloudflaredStatus = () => {
+  return useQuery({
+    queryKey: ["cloudflared-status"],
+    queryFn: tunnelApi.checkCloudflared,
   });
 };
