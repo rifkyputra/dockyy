@@ -503,5 +503,61 @@ def init_routes(app, db_engine):
         except Exception as e:
             logger.error(f"Error running git pull for {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
+        
+    @repositories_bp.route('/api/repositories/<int:repo_id>/git/log', methods=['GET'])
+    def git_log(repo_id):
+        try:
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+
+            path = repo.filesystem_path
+            if not path or not check_git_repo(path):
+                session.close()
+                return jsonify({'error': 'Not a git repository'}), 400
+
+            res = run_git_cmd(path, ['log', '--oneline', '-n', '20'])
+            session.close()
+            return jsonify(res), 200
+        except Exception as e:
+            logger.error(f"Error running git log for {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+        
+    @repositories_bp.route('/api/repositories/<int:repo_id>/readme', methods=['POST'])
+    def repository_readme(repo_id):
+        """Get the README.md content from the repository's filesystem path"""
+        try:
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+            
+            data = request.get_json() or {}
+            path = data.get('filesystem_path')
+
+            filesystem_path = path or repo.filesystem_path
+            if not filesystem_path or not os.path.exists(filesystem_path):
+                session.close()
+                return jsonify({'error': 'Filesystem path not found'}), 404
+
+            readme_path = os.path.join(filesystem_path, 'README.md')
+            if not os.path.isfile(readme_path):
+                session.close()
+                return jsonify({'error': 'README.md not found'}), 404
+
+            with open(readme_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            session.close()
+            return jsonify({'content': content}), 200
+        except Exception as e:
+            logger.error(f"Error reading README for repository {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
     
     app.register_blueprint(repositories_bp)

@@ -165,3 +165,16 @@ export const repositoryApi = {
     return response.json();
   },
 };
+
+// README API
+export const readmeApi = {
+  post: async (id: number, path?: string): Promise<{ content: string }> => {
+    const response = await fetch(`${API_BASE}/repositories/${id}/readme`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!response.ok) throw new Error("Failed to fetch README");
+    return response.json();
+  },
+};

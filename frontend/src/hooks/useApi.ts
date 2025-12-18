@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { containerApi, repositoryApi } from "../lib/api";
+import { containerApi, repositoryApi, readmeApi } from "../lib/api";
 import type { CreateRepositoryInput, UpdateRepositoryInput } from "../types";
 
 // Container hooks
@@ -136,6 +136,15 @@ export const useRepositoryComposeFile = (id: number) => {
   return useQuery({
     queryKey: ["repositories", id, "compose-file"],
     queryFn: () => repositoryApi.getComposeFile(id),
+    enabled: !!id,
+  });
+};
+
+// README hook
+export const useReadme = (id: number, path?: string) => {
+  return useQuery({
+    queryKey: ["readme", id, path],
+    queryFn: () => readmeApi.post(id, path),
     enabled: !!id,
   });
 };

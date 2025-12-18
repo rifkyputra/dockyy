@@ -22,7 +22,6 @@
     "forceConsistentCasingInFileNames": true,
     
     /* Path Mapping */
-    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }

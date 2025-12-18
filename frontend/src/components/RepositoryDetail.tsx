@@ -14,6 +14,7 @@ import {
 import { UpdateRepositoryInput } from "@/types";
 import { useState, useEffect } from "react";
 import GitControls from "./GitControls";
+import ReadmeSection from "./ReadmeSection";
 
 const RepositoryDetail = () => {
   const { id } = useParams<{ id: string }>();
@@ -245,6 +246,7 @@ const RepositoryDetail = () => {
                 </label>
                 <input
                   type="url"
+                  title="url-label"
                   className="input input-bordered"
                   value={editData.url || ""}
                   onChange={(e) =>
@@ -260,6 +262,7 @@ const RepositoryDetail = () => {
                 </label>
                 <textarea
                   className="textarea textarea-bordered"
+                  title="description"
                   value={editData.description || ""}
                   onChange={(e) =>
                     setEditData({ ...editData, description: e.target.value })
@@ -274,6 +277,7 @@ const RepositoryDetail = () => {
                 </label>
                 <input
                   type="text"
+                  title="filesystem-path"
                   className="input input-bordered"
                   value={editData.filesystem_path || ""}
                   onChange={(e) =>
@@ -630,8 +634,12 @@ const RepositoryDetail = () => {
         </div>
       )}
       {filesystemStatus?.has_git_repo && (
-        <div className="mt-4">
+        <div className="mt-4 space-y-4">
           <GitControls repoId={repository.id} />
+          <ReadmeSection
+            repositoryId={repository.id}
+            filesystemPath={repository?.filesystem_path}
+          />
         </div>
       )}
     </div>
