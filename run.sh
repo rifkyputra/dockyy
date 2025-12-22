@@ -52,7 +52,7 @@ sleep 2
 # Start frontend server
 echo -e "${GREEN}Starting React frontend on http://localhost:3000${NC}"
 cd frontend
-bun run dev &
+SERVER_URL=${SERVER_URL:-"http://localhost:8012"} bun run dev &
 FRONTEND_PID=$!
 cd ..
 

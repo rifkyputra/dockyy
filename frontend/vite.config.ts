@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => {
       allowedHosts: ["localhost", "127.0.0.1", "dockyy.galeri.ee"],
       proxy: {
         "/api": {
-          target: env.SERVER_URL || "http://localhost:5000",
+          target: env.SERVER_URL || "http://localhost:8012",
           changeOrigin: true,
         },
       },
