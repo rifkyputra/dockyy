@@ -4,6 +4,8 @@ import ContainersPage from "./pages/ContainersPage";
 import RepositoriesPage from "./pages/RepositoriesPage";
 import CloudflareTunnelPage from "./pages/CloudflareTunnelPage";
 import RepositoryDetail from "./components/RepositoryDetail";
+import LoginPage from "./pages/LoginPage";
+import ProtectedRoute from "./components/ProtectedRoute";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 function App() {
@@ -15,14 +17,17 @@ function App() {
 
         <div className="container mx-auto p-4 space-y-6">
           <Routes>
-            <Route path="/" element={<Navigate to="/containers" replace />} />
-            <Route path="/containers" element={<ContainersPage />} />
-            <Route path="/repositories" element={<RepositoriesPage />} />
-            <Route path="/repositories/:id" element={<RepositoryDetail />} />
-            <Route
-              path="/cloudflare-tunnel"
-              element={<CloudflareTunnelPage />}
-            />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/" element={<ProtectedRoute />}>
+              <Route index element={<Navigate to="/containers" replace />} />
+              <Route path="containers" element={<ContainersPage />} />
+              <Route path="repositories" element={<RepositoriesPage />} />
+              <Route path="repositories/:id" element={<RepositoryDetail />} />
+              <Route
+                path="cloudflare-tunnel"
+                element={<CloudflareTunnelPage />}
+              />
+            </Route>
           </Routes>
         </div>
       </div>

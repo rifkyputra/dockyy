@@ -11,6 +11,7 @@ dependencies = [
   "sqlalchemy-libsql>=0.2.0",
   "alembic>=1.17.2",
   "pyyaml>=6.0.0",
+  "pyjwt>=2.8.0",
 ]
 
 [project.optional-dependencies]

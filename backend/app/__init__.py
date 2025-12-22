@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 from app.routes.containers import init_routes as init_containers
 from app.routes.tunnels import init_routes as init_tunnels
+from app.routes.auth import init_routes as init_auth
 
 
 # Initialize Docker client with error handling
@@ -78,6 +79,7 @@ except Exception as e:
 init_repositories(app, dbEngine)
 init_containers(app, docker_client)
 init_tunnels(app)
+init_auth(app)
 
 @app.route('/api/health', methods=['GET'])
 def health():

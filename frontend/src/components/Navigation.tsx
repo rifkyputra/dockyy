@@ -1,11 +1,22 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 export default function Navigation() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const token = localStorage.getItem("token");
 
   const isActive = (path: string) => {
     return location.pathname === path ? "active" : "";
   };
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    navigate("/login");
+  };
+
+  if (!token) {
+    return null; // Don't show navigation if not authenticated
+  }
 
   return (
     <div className="navbar bg-base-100 shadow-md">
@@ -35,6 +46,9 @@ export default function Navigation() {
             </Link>
           </li>
         </ul>
+        <button onClick={handleLogout} className="btn btn-ghost ml-4">
+          Logout
+        </button>
       </div>
     </div>
   );
