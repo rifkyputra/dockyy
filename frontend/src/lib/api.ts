@@ -6,7 +6,7 @@ import type {
   DockerComposeFile,
 } from "../types";
 
-const API_BASE = "http://localhost:8012";
+const API_BASE = "/api";
 
 // Container API
 export const containerApi = {
