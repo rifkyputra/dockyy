@@ -24,14 +24,18 @@ trap cleanup SIGINT SIGTERM
 
 # Check if backend venv exists
 if [ ! -d "backend/.venv" ]; then
-    echo -e "${RED}Backend virtual environment not found. Please run setup first.${NC}"
-    exit 1
+    echo -e "${BLUE}Setting up backend virtual environment...${NC}"
+    cd backend
+    uv sync
+    cd ..
 fi
 
 # Check if frontend node_modules exists
 if [ ! -d "frontend/node_modules" ]; then
-    echo -e "${RED}Frontend dependencies not found. Please run 'bun install' in frontend directory.${NC}"
-    exit 1
+    echo -e "${BLUE}Installing frontend dependencies...${NC}"
+    cd frontend
+    bun install
+    cd ..
 fi
 
 # Start backend server

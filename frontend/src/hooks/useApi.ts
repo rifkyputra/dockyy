@@ -164,3 +164,17 @@ export const useCloudflaredStatus = () => {
     queryFn: tunnelApi.checkCloudflared,
   });
 };
+
+export const useCloudflaredConfig = () => {
+  return useQuery({
+    queryKey: ["cloudflared-config"],
+    queryFn: tunnelApi.getConfig,
+  });
+};
+
+export const useCloudflaredTunnels = () => {
+  return useQuery({
+    queryKey: ["cloudflared-tunnels"],
+    queryFn: tunnelApi.listTunnels,
+  });
+};

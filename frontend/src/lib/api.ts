@@ -203,4 +203,23 @@ export const tunnelApi = {
     if (!response.ok) throw new Error("Failed to check cloudflared status");
     return response.json();
   },
+
+  getConfig: async (): Promise<{
+    config?: any;
+    config_path?: string;
+    error?: string;
+  }> => {
+    const response = await fetch(`${API_BASE}/tunnels/cloudflared/config`);
+    if (!response.ok) throw new Error("Failed to get cloudflared config");
+    return response.json();
+  },
+
+  listTunnels: async (): Promise<{
+    tunnels?: any[];
+    error?: string;
+  }> => {
+    const response = await fetch(`${API_BASE}/tunnels/cloudflared/tunnels`);
+    if (!response.ok) throw new Error("Failed to list cloudflared tunnels");
+    return response.json();
+  },
 };
