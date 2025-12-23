@@ -257,17 +257,19 @@ export const tunnelApi = {
     return response.json();
   },
 
-  installService: async (
+  reinstallService: async (
     configPath?: string
   ): Promise<{
     success: boolean;
     message?: string;
     error?: string;
-    stdout?: string;
-    stderr?: string;
+    uninstall_stdout?: string;
+    uninstall_stderr?: string;
+    install_stdout?: string;
+    install_stderr?: string;
   }> => {
     const response = await fetch(
-      `${API_BASE}/tunnels/cloudflared/service/install`,
+      `${API_BASE}/tunnels/cloudflared/service/reinstall`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -277,33 +279,7 @@ export const tunnelApi = {
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(
-        errorData.error || "Failed to install cloudflared service"
-      );
-    }
-    return response.json();
-  },
-
-  uninstallService: async (
-    configPath?: string
-  ): Promise<{
-    success: boolean;
-    message?: string;
-    error?: string;
-    stdout?: string;
-    stderr?: string;
-  }> => {
-    const response = await fetch(
-      `${API_BASE}/tunnels/cloudflared/service/uninstall`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config_path: configPath }),
-      }
-    );
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(
-        errorData.error || "Failed to uninstall cloudflared service"
+        errorData.error || "Failed to reinstall cloudflared service"
       );
     }
     return response.json();

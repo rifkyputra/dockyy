@@ -147,83 +147,53 @@ def init_routes(app):
                 'error': str(e)
             }), 500
 
-    @tunnels_bp.route('/api/tunnels/cloudflared/service/install', methods=['POST'])
-    def install_cloudflared_service():
-        logger.info("Installing cloudflared service")
+    @tunnels_bp.route('/api/tunnels/cloudflared/service/reinstall', methods=['POST'])
+    def reinstall_cloudflared_service():
+        logger.info("Reinstalling cloudflared service")
 
         try:
             from flask import request
             data = request.get_json() or {}
             config_path = data.get('config_path', '/home/ubuntu/.cloudflared/config.yaml')
             
-            # Run the install command with sudo
-            cmd = ['sudo', 'cloudflared', '--config', config_path, 'service', 'install']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            # First, uninstall the service
+            logger.info("Step 1: Uninstalling cloudflared service")
+            uninstall_cmd = ['sudo', 'cloudflared', '--config', config_path, 'service', 'uninstall']
+            uninstall_result = subprocess.run(uninstall_cmd, capture_output=True, text=True, timeout=60)
             
-            if result.returncode == 0:
-                logger.info(f"Successfully installed cloudflared service")
+            # Continue with install even if uninstall fails (service might not be installed)
+            logger.info("Step 2: Installing cloudflared service")
+            install_cmd = ['sudo', 'cloudflared', '--config', config_path, 'service', 'install']
+            install_result = subprocess.run(install_cmd, capture_output=True, text=True, timeout=60)
+            
+            if install_result.returncode == 0:
+                logger.info(f"Successfully reinstalled cloudflared service")
                 return jsonify({
                     'success': True,
-                    'message': 'Cloudflared service installed successfully',
-                    'stdout': result.stdout,
-                    'stderr': result.stderr
+                    'message': 'Cloudflared service reinstalled successfully',
+                    'uninstall_stdout': uninstall_result.stdout,
+                    'uninstall_stderr': uninstall_result.stderr,
+                    'install_stdout': install_result.stdout,
+                    'install_stderr': install_result.stderr
                 })
             else:
-                logger.error(f"Failed to install cloudflared service: {result.stderr}")
+                logger.error(f"Failed to reinstall cloudflared service: {install_result.stderr}")
                 return jsonify({
                     'success': False,
-                    'error': result.stderr or 'Failed to install service',
-                    'stdout': result.stdout
+                    'error': install_result.stderr or 'Failed to install service',
+                    'uninstall_stdout': uninstall_result.stdout,
+                    'uninstall_stderr': uninstall_result.stderr,
+                    'install_stdout': install_result.stdout,
+                    'install_stderr': install_result.stderr
                 }), 500
         except subprocess.TimeoutExpired:
-            logger.error("Cloudflared service install timed out")
+            logger.error("Cloudflared service reinstall timed out")
             return jsonify({
                 'success': False,
-                'error': 'Timeout installing service'
+                'error': 'Timeout reinstalling service'
             }), 500
         except Exception as e:
-            logger.error(f"Error installing cloudflared service: {e}")
-            return jsonify({
-                'success': False,
-                'error': str(e)
-            }), 500
-
-    @tunnels_bp.route('/api/tunnels/cloudflared/service/uninstall', methods=['POST'])
-    def uninstall_cloudflared_service():
-        logger.info("Uninstalling cloudflared service")
-
-        try:
-            from flask import request
-            data = request.get_json() or {}
-            config_path = data.get('config_path', '/home/ubuntu/.cloudflared/config.yaml')
-            
-            # Run the uninstall command with sudo
-            cmd = ['sudo', 'cloudflared', '--config', config_path, 'service', 'uninstall']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                logger.info(f"Successfully uninstalled cloudflared service")
-                return jsonify({
-                    'success': True,
-                    'message': 'Cloudflared service uninstalled successfully',
-                    'stdout': result.stdout,
-                    'stderr': result.stderr
-                })
-            else:
-                logger.error(f"Failed to uninstall cloudflared service: {result.stderr}")
-                return jsonify({
-                    'success': False,
-                    'error': result.stderr or 'Failed to uninstall service',
-                    'stdout': result.stdout
-                }), 500
-        except subprocess.TimeoutExpired:
-            logger.error("Cloudflared service uninstall timed out")
-            return jsonify({
-                'success': False,
-                'error': 'Timeout uninstalling service'
-            }), 500
-        except Exception as e:
-            logger.error(f"Error uninstalling cloudflared service: {e}")
+            logger.error(f"Error reinstalling cloudflared service: {e}")
             return jsonify({
                 'success': False,
                 'error': str(e)

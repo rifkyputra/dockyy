@@ -29,25 +29,14 @@ export default function CloudflareTunnelPage() {
     },
   });
 
-  const installServiceMutation = useMutation({
+  const reinstallServiceMutation = useMutation({
     mutationFn: () =>
-      tunnelApi.installService("/home/ubuntu/.cloudflared/config.yaml"),
+      tunnelApi.reinstallService("/home/ubuntu/.cloudflared/config.yaml"),
     onSuccess: (data) => {
-      alert(data.message || "Service installed successfully");
+      alert(data.message || "Service reinstalled successfully");
     },
     onError: (error: Error) => {
-      alert("Error installing service: " + error.message);
-    },
-  });
-
-  const uninstallServiceMutation = useMutation({
-    mutationFn: () =>
-      tunnelApi.uninstallService("/home/ubuntu/.cloudflared/config.yaml"),
-    onSuccess: (data) => {
-      alert(data.message || "Service uninstalled successfully");
-    },
-    onError: (error: Error) => {
-      alert("Error uninstalling service: " + error.message);
+      alert("Error reinstalling service: " + error.message);
     },
   });
 
@@ -190,41 +179,21 @@ export default function CloudflareTunnelPage() {
         <div className="card-body">
           <h2 className="card-title">Cloudflare Tunnel Service</h2>
           <p className="text-base-content/70 mb-4">
-            Install or uninstall the cloudflared service as a system service.
+            Reinstall the cloudflared service as a system service.
           </p>
-          <div className="flex gap-4">
+          <div>
             <button
-              className="btn btn-success"
-              onClick={() => installServiceMutation.mutate()}
-              disabled={
-                installServiceMutation.isPending ||
-                uninstallServiceMutation.isPending
-              }
+              className="btn btn-primary"
+              onClick={() => reinstallServiceMutation.mutate()}
+              disabled={reinstallServiceMutation.isPending}
             >
-              {installServiceMutation.isPending ? (
+              {reinstallServiceMutation.isPending ? (
                 <>
                   <span className="loading loading-spinner loading-sm"></span>
-                  Installing...
+                  Reinstalling...
                 </>
               ) : (
-                "Install Service"
-              )}
-            </button>
-            <button
-              className="btn btn-error"
-              onClick={() => uninstallServiceMutation.mutate()}
-              disabled={
-                installServiceMutation.isPending ||
-                uninstallServiceMutation.isPending
-              }
-            >
-              {uninstallServiceMutation.isPending ? (
-                <>
-                  <span className="loading loading-spinner loading-sm"></span>
-                  Uninstalling...
-                </>
-              ) : (
-                "Uninstall Service"
+                "Reinstall Service"
               )}
             </button>
           </div>
