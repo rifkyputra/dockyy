@@ -44,6 +44,21 @@ def run_git_cmd(path: str, args: List[str], timeout: int = 30, ssh_password: Opt
         env = os.environ.copy()
         askpass_script = None
         
+        # Check for local git config core.sshcommand
+        git_ssh_command = None
+        try:
+            result = subprocess.run(
+                ['git', 'config', '--local', 'core.sshcommand'],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                git_ssh_command = result.stdout.strip()
+        except Exception:
+            pass
+        
         # If SSH password is provided, create a temporary askpass script
         if ssh_password:
             # Create a temporary script that returns the password
@@ -59,7 +74,15 @@ def run_git_cmd(path: str, args: List[str], timeout: int = 30, ssh_password: Opt
             env['SSH_ASKPASS'] = askpass_script.name
             env['SSH_ASKPASS_REQUIRE'] = 'force'
             env['DISPLAY'] = ':0'  # Required for SSH_ASKPASS to work
-            env['GIT_SSH_COMMAND'] = 'ssh -o StrictHostKeyChecking=no'
+            
+            # If there's a local git config, append our options to it
+            if git_ssh_command:
+                env['GIT_SSH_COMMAND'] = f'{git_ssh_command} -o StrictHostKeyChecking=no'
+            else:
+                env['GIT_SSH_COMMAND'] = 'ssh -o StrictHostKeyChecking=no'
+        elif git_ssh_command:
+            # Use the local git config core.sshcommand
+            env['GIT_SSH_COMMAND'] = git_ssh_command
         
         result = subprocess.run(
             ['git', *args],
