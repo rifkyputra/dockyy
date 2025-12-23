@@ -140,6 +140,14 @@ export const useComposeFiles = (id: number) => {
   });
 };
 
+export const useGitConfig = (id: number) => {
+  return useQuery({
+    queryKey: ["repositories", id, "git-config"],
+    queryFn: () => repositoryApi.gitConfig(id),
+    enabled: !!id,
+  });
+};
+
 // README hook
 export const useReadme = (id: number, path?: string) => {
   return useQuery({

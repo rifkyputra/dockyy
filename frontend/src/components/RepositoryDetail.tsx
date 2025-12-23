@@ -10,6 +10,7 @@ import {
   useRebuildProject,
   useContainers,
   useComposeFiles,
+  useGitConfig,
 } from "@/hooks/useApi";
 import { UpdateRepositoryInput } from "@/types";
 import { useState } from "react";
@@ -33,6 +34,7 @@ const RepositoryDetail = () => {
   const { data: containers } = useContainers();
 
   const { data: composeFiles } = useComposeFiles(repoId);
+  const { data: gitConfig } = useGitConfig(repoId);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<UpdateRepositoryInput>({});
@@ -508,6 +510,37 @@ const RepositoryDetail = () => {
 
       {filesystemStatus?.has_git_repo && (
         <div className="mt-4 space-y-4">
+          {/* Git Config Section */}
+          {gitConfig &&
+            gitConfig.returncode === 0 &&
+            Object.keys(gitConfig.config).length > 0 && (
+              <div className="card bg-base-100 shadow-xl">
+                <div className="card-body">
+                  <h2 className="card-title">Git Configuration (Local)</h2>
+                  <div className="overflow-x-auto">
+                    <table className="table table-sm">
+                      <thead>
+                        <tr>
+                          <th>Key</th>
+                          <th>Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(gitConfig.config).map(
+                          ([key, value]) => (
+                            <tr key={key}>
+                              <td className="font-mono text-xs">{key}</td>
+                              <td className="font-mono text-xs">{value}</td>
+                            </tr>
+                          )
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
           <GitControls repoId={repository.id} />
           <ReadmeSection
             repositoryId={repository.id}

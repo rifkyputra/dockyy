@@ -10,7 +10,7 @@ const GitControls: React.FC<Props> = ({ repoId }) => {
   const [output, setOutput] = useState<string>("");
   const [diffFiles, setDiffFiles] = useState<any[] | null>(null);
 
-  const run = async (action: "status" | "fetch" | "pull") => {
+  const run = async (action: "status" | "fetch" | "pull" | "stash") => {
     setLoading(action);
     setOutput("");
     try {
@@ -19,8 +19,10 @@ const GitControls: React.FC<Props> = ({ repoId }) => {
         res = await repositoryApi.gitStatus(repoId);
       } else if (action === "fetch") {
         res = await repositoryApi.gitFetch(repoId);
-      } else {
+      } else if (action === "pull") {
         res = await repositoryApi.gitPull(repoId);
+      } else if (action === "stash") {
+        res = await repositoryApi.gitStash(repoId);
       }
       // if status, we may receive structured diff
       if (action === "status") {
@@ -83,6 +85,17 @@ const GitControls: React.FC<Props> = ({ repoId }) => {
                 <span className="loading loading-spinner loading-sm"></span>
               ) : (
                 "Pull"
+              )}
+            </button>
+            <button
+              className="btn btn-sm btn-warning"
+              onClick={() => run("stash")}
+              disabled={!!loading}
+            >
+              {loading === "stash" ? (
+                <span className="loading loading-spinner loading-sm"></span>
+              ) : (
+                "Stash"
               )}
             </button>
           </div>

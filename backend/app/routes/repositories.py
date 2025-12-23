@@ -452,6 +452,74 @@ def init_routes(app, db_engine):
         except Exception as e:
             logger.error(f"Error running git log for {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
+    
+    @repositories_bp.route('/api/repositories/<int:repo_id>/git/config', methods=['GET'])
+    def git_config(repo_id):
+        """Get git config for the repository"""
+        try:
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+
+            path = repo.filesystem_path
+            if not path or not check_git_repo(path):
+                session.close()
+                return jsonify({'error': 'Not a git repository'}), 400
+
+            # Get git config list
+            res = run_git_cmd(path, ['config', '--list', '--local'])
+            
+            config = {}
+            if res['returncode'] == 0 and res['stdout']:
+                # Parse config output
+                for line in res['stdout'].strip().split('\n'):
+                    if '=' in line:
+                        key, value = line.split('=', 1)
+                        config[key] = value
+            
+            session.close()
+            return jsonify({
+                'returncode': res['returncode'],
+                'config': config,
+                'stderr': res['stderr']
+            }), 200
+        except Exception as e:
+            logger.error(f"Error getting git config for {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    @repositories_bp.route('/api/repositories/<int:repo_id>/git/stash', methods=['POST'])
+    def git_stash(repo_id):
+        """Run git stash on the repository"""
+        try:
+            data = request.get_json() or {}
+            message = data.get('message', '')
+            
+            session = Session(db_engine)
+            stmt = select(Repository).where(Repository.id == repo_id)
+            repo = session.scalar(stmt)
+            if not repo:
+                session.close()
+                return jsonify({'error': 'Repository not found'}), 404
+
+            path = repo.filesystem_path
+            if not path or not check_git_repo(path):
+                session.close()
+                return jsonify({'error': 'Not a git repository'}), 400
+
+            # Run git stash
+            if message:
+                res = run_git_cmd(path, ['stash', 'push', '-m', message])
+            else:
+                res = run_git_cmd(path, ['stash'])
+            
+            session.close()
+            return jsonify(res), 200
+        except Exception as e:
+            logger.error(f"Error running git stash for {repo_id}: {e}")
+            return jsonify({'error': str(e)}), 500
         
     @repositories_bp.route('/api/repositories/<int:repo_id>/docker-compose', methods=['GET'])
     def repository_scan_compose_files(repo_id):

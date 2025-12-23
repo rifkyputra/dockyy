@@ -170,6 +170,31 @@ export const repositoryApi = {
     if (!response.ok) throw new Error("Failed to run git pull");
     return response.json();
   },
+
+  gitConfig: async (
+    id: number
+  ): Promise<{
+    returncode: number;
+    config: Record<string, string>;
+    stderr: string;
+  }> => {
+    const response = await fetch(`${API_BASE}/repositories/${id}/git/config`);
+    if (!response.ok) throw new Error("Failed to get git config");
+    return response.json();
+  },
+
+  gitStash: async (
+    id: number,
+    message?: string
+  ): Promise<{ returncode: number; stdout: string; stderr: string }> => {
+    const response = await fetch(`${API_BASE}/repositories/${id}/git/stash`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message || "" }),
+    });
+    if (!response.ok) throw new Error("Failed to run git stash");
+    return response.json();
+  },
 };
 
 // README API
@@ -207,12 +232,80 @@ export const tunnelApi = {
     return response.json();
   },
 
+  updateConfig: async (
+    config: any
+  ): Promise<{
+    config: any;
+    config_path: string;
+    message: string;
+  }> => {
+    const response = await fetch(`${API_BASE}/tunnels/cloudflared/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config }),
+    });
+    if (!response.ok) throw new Error("Failed to update cloudflared config");
+    return response.json();
+  },
+
   listTunnels: async (): Promise<{
     tunnels?: any[];
     error?: string;
   }> => {
     const response = await fetch(`${API_BASE}/tunnels/cloudflared/tunnels`);
     if (!response.ok) throw new Error("Failed to list cloudflared tunnels");
+    return response.json();
+  },
+
+  installService: async (
+    configPath?: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+  }> => {
+    const response = await fetch(
+      `${API_BASE}/tunnels/cloudflared/service/install`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config_path: configPath }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(
+        errorData.error || "Failed to install cloudflared service"
+      );
+    }
+    return response.json();
+  },
+
+  uninstallService: async (
+    configPath?: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    stdout?: string;
+    stderr?: string;
+  }> => {
+    const response = await fetch(
+      `${API_BASE}/tunnels/cloudflared/service/uninstall`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config_path: configPath }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(
+        errorData.error || "Failed to uninstall cloudflared service"
+      );
+    }
     return response.json();
   },
 };
