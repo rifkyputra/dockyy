@@ -24,6 +24,7 @@ const RepositoriesTable = () => {
     description: "",
     webhook_url: "",
     filesystem_path: "",
+    ssh_password: "",
     is_private: false,
     default_branch: "main",
   });
@@ -40,6 +41,7 @@ const RepositoriesTable = () => {
         description: "",
         webhook_url: "",
         filesystem_path: "",
+        ssh_password: "",
         is_private: false,
         default_branch: "main",
       });
@@ -214,6 +216,29 @@ const RepositoriesTable = () => {
                     </label>
                   </div>
                 </div>
+                {newRepo.is_private && (
+                  <div className="form-control">
+                    <label className="label">
+                      <span className="label-text">SSH Password</span>
+                      <span className="label-text-alt text-warning">
+                        For private repositories requiring SSH password
+                        authentication
+                      </span>
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="Enter SSH password (optional)"
+                      className="input input-bordered"
+                      value={newRepo.ssh_password || ""}
+                      onChange={(e) =>
+                        setNewRepo({
+                          ...newRepo,
+                          ssh_password: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                )}
                 <div className="card-actions justify-end">
                   <button
                     type="submit"

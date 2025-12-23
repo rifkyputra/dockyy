@@ -132,14 +132,6 @@ export const useRepositoryFilesystemStatus = (id: number) => {
   });
 };
 
-export const useRepositoryComposeFile = (id: number) => {
-  return useQuery({
-    queryKey: ["repositories", id, "compose-file"],
-    queryFn: () => repositoryApi.getComposeFile(id),
-    enabled: !!id,
-  });
-};
-
 export const useComposeFiles = (id: number) => {
   return useQuery({
     queryKey: ["repositories", id, "compose-files"],

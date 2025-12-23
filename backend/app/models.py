@@ -15,6 +15,7 @@ class Repository(Base):
     description: Mapped[str | None] = mapped_column(String, nullable=True)
     webhook_url: Mapped[str | None] = mapped_column(String, nullable=True)
     filesystem_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    ssh_password: Mapped[str | None] = mapped_column(String, nullable=True)
     is_private: Mapped[bool] = mapped_column(Boolean, default=False)
     default_branch: Mapped[str] = mapped_column(String, default='main')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

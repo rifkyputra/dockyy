@@ -9,11 +9,10 @@ import {
   useRestartProject,
   useRebuildProject,
   useContainers,
-  useRepositoryComposeFile,
   useComposeFiles,
 } from "@/hooks/useApi";
 import { UpdateRepositoryInput } from "@/types";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import GitControls from "./GitControls";
 import ReadmeSection from "./ReadmeSection";
 import DockerComposeList from "./DockerComposeList";
@@ -32,11 +31,6 @@ const RepositoryDetail = () => {
   const restartProject = useRestartProject();
   const rebuildProject = useRebuildProject();
   const { data: containers } = useContainers();
-  const {
-    data: composeFile,
-    isLoading: composeLoading,
-    error: composeError,
-  } = useRepositoryComposeFile(repoId);
 
   const { data: composeFiles } = useComposeFiles(repoId);
 
@@ -52,6 +46,7 @@ const RepositoryDetail = () => {
         description: repository.description,
         webhook_url: repository.webhook_url,
         filesystem_path: repository.filesystem_path,
+        ssh_password: repository.ssh_password,
         is_private: repository.is_private,
         default_branch: repository.default_branch,
       });
@@ -328,6 +323,28 @@ const RepositoryDetail = () => {
                 </label>
               </div>
 
+              {editData.is_private && (
+                <div className="form-control md:col-span-2">
+                  <label className="label">
+                    <span className="label-text">SSH Password</span>
+                    <span className="label-text-alt text-warning">
+                      For private repositories requiring SSH password
+                      authentication
+                    </span>
+                  </label>
+                  <input
+                    title="ssh-password"
+                    type="password"
+                    className="input input-bordered"
+                    value={editData.ssh_password || ""}
+                    onChange={(e) =>
+                      setEditData({ ...editData, ssh_password: e.target.value })
+                    }
+                    placeholder="Enter SSH password (optional)"
+                  />
+                </div>
+              )}
+
               <div className="form-control md:col-span-2">
                 <label className="label">
                   <span className="label-text">Webhook URL</span>
@@ -489,158 +506,6 @@ const RepositoryDetail = () => {
         <DockerComposeList composeFiles={composeFiles} />
       )}
 
-      {filesystemStatus?.has_docker_compose && (
-        <div className="card bg-base-100 shadow-md">
-          <div className="card-body">
-            <div className="flex justify-between items-center">
-              <h2 className="card-title">Docker Compose</h2>
-              <div className="flex gap-2">
-                {projectIsRunning ? (
-                  <button
-                    onClick={handleStopProject}
-                    className="btn btn-warning btn-sm"
-                    disabled={stopProject.isPending}
-                  >
-                    {stopProject.isPending ? (
-                      <span className="loading loading-spinner loading-sm"></span>
-                    ) : (
-                      "Stop Project"
-                    )}
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleStartProject}
-                    className="btn btn-success btn-sm"
-                    disabled={startProject.isPending}
-                  >
-                    {startProject.isPending ? (
-                      <span className="loading loading-spinner loading-sm"></span>
-                    ) : (
-                      "Start Project"
-                    )}
-                  </button>
-                )}
-                <button
-                  onClick={handleRestartProject}
-                  className="btn btn-sm"
-                  disabled={restartProject.isPending}
-                >
-                  {restartProject.isPending ? (
-                    <span className="loading loading-spinner loading-sm"></span>
-                  ) : (
-                    "Restart"
-                  )}
-                </button>
-                <button
-                  onClick={handleRebuildProject}
-                  className="btn btn-sm btn-outline"
-                  disabled={rebuildProject.isPending}
-                >
-                  {rebuildProject.isPending ? (
-                    <span className="loading loading-spinner loading-sm"></span>
-                  ) : (
-                    "Rebuild"
-                  )}
-                </button>
-              </div>
-            </div>
-
-            <p className="text-sm text-base-content/70 mt-2">
-              Project: <span className="font-mono">{projectName}</span>
-            </p>
-
-            <div className="mt-4">
-              <h3 className="font-semibold text-sm mb-2">Containers</h3>
-              {projectContainers.length > 0 ? (
-                <div className="grid gap-2">
-                  {projectContainers.map((c) => (
-                    <div
-                      key={c.id}
-                      className="flex items-center justify-between p-2 border rounded"
-                    >
-                      <div>
-                        <div className="font-semibold">{c.name}</div>
-                        <div className="text-xs text-base-content/60">
-                          {c.image}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`badge ${
-                            c.status === "running"
-                              ? "badge-success"
-                              : c.status === "exited"
-                              ? "badge-error"
-                              : "badge-warning"
-                          }`}
-                        >
-                          {c.status}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-base-content/60">
-                  No containers found for this project.
-                </p>
-              )}
-            </div>
-
-            <div className="mt-6">
-              <h3 className="font-semibold text-sm mb-2">Compose File</h3>
-              {composeLoading ? (
-                <div className="text-sm">Loading compose file...</div>
-              ) : composeError ? (
-                <div className="text-sm text-error">
-                  Failed to load compose file
-                </div>
-              ) : composeFile ? (
-                <div>
-                  <p className="text-xs text-base-content/60 mb-2">
-                    Path: <span className="font-mono">{composeFile.path}</span>
-                  </p>
-                  <div className="mb-3">
-                    <h4 className="font-medium text-sm mb-1">Services</h4>
-                    {(() => {
-                      const services: string[] = [];
-                      if (composeFile.content) {
-                        const re = /^[ \t]{2,}([a-zA-Z0-9_\-]+):/gm;
-                        let m;
-                        while ((m = re.exec(composeFile.content)) !== null) {
-                          if (m[1] && !services.includes(m[1]))
-                            services.push(m[1]);
-                        }
-                      }
-                      return services.length > 0 ? (
-                        <div className="flex flex-wrap gap-2">
-                          {services.map((s) => (
-                            <div key={s} className="badge badge-outline">
-                              {s}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-base-content/60">
-                          No services detected in compose file.
-                        </p>
-                      );
-                    })()}
-                  </div>
-
-                  <pre className="bg-base-200 p-3 rounded text-sm overflow-x-auto">
-                    {composeFile.content}
-                  </pre>
-                </div>
-              ) : (
-                <p className="text-sm text-base-content/60">
-                  No compose file available.
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
       {filesystemStatus?.has_git_repo && (
         <div className="mt-4 space-y-4">
           <GitControls repoId={repository.id} />

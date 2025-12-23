@@ -39,6 +39,7 @@ def init_routes(app, db_engine):
                     'description': repo.description,
                     'webhook_url': repo.webhook_url,
                     'filesystem_path': repo.filesystem_path,
+                    'ssh_password': repo.ssh_password,
                     'is_private': repo.is_private,
                     'default_branch': repo.default_branch,
                     'created_at': repo.created_at.isoformat() if repo.created_at else None,
@@ -107,6 +108,7 @@ def init_routes(app, db_engine):
                 description=data.get('description'),
                 webhook_url=data.get('webhook_url'),
                 filesystem_path=data.get('filesystem_path'),
+                ssh_password=data.get('ssh_password'),
                 is_private=data.get('is_private', False),
                 default_branch=data.get('default_branch', 'main'),
                 created_at=datetime.utcnow(),
@@ -125,6 +127,7 @@ def init_routes(app, db_engine):
                 'description': new_repo.description,
                 'webhook_url': new_repo.webhook_url,
                 'filesystem_path': new_repo.filesystem_path,
+                'ssh_password': new_repo.ssh_password,
                 'is_private': new_repo.is_private,
                 'default_branch': new_repo.default_branch,
                 'created_at': new_repo.created_at.isoformat() if new_repo.created_at else None,
@@ -166,6 +169,8 @@ def init_routes(app, db_engine):
                 repo.webhook_url = data['webhook_url']
             if 'filesystem_path' in data:
                 repo.filesystem_path = data['filesystem_path']
+            if 'ssh_password' in data:
+                repo.ssh_password = data['ssh_password']
             if 'is_private' in data:
                 repo.is_private = data['is_private']
             if 'default_branch' in data:
@@ -184,6 +189,7 @@ def init_routes(app, db_engine):
                 'description': repo.description,
                 'webhook_url': repo.webhook_url,
                 'filesystem_path': repo.filesystem_path,
+                'ssh_password': repo.ssh_password,
                 'is_private': repo.is_private,
                 'default_branch': repo.default_branch,
                 'created_at': repo.created_at.isoformat() if repo.created_at else None,
@@ -334,55 +340,6 @@ def init_routes(app, db_engine):
             logger.error(f"Error listing compose files for repository {repo_id}: {e}")
             return jsonify({'error': str(e)}), 500
 
-    @repositories_bp.route('/api/repositories/<int:repo_id>/compose-file', methods=['GET'])
-    def get_repository_compose_file(repo_id):
-        """Return first docker-compose file content for a repository if present"""
-        try:
-            session = Session(db_engine)
-            stmt = select(Repository).where(Repository.id == repo_id)
-            repo = session.scalar(stmt)
-
-            if not repo:
-                session.close()
-                return jsonify({'error': 'Repository not found'}), 404
-
-            filesystem_path = repo.filesystem_path
-            if not filesystem_path or not os.path.exists(filesystem_path):
-                session.close()
-                return jsonify({'error': 'Filesystem path not found'}), 404
-
-            # Look for common compose filenames in root first
-            compose_files = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']
-            found = None
-            for f in compose_files:
-                candidate = os.path.join(filesystem_path, f)
-                if os.path.isfile(candidate):
-                    found = candidate
-                    break
-
-            # If not found in root, search recursively and pick first
-            if not found:
-                for root, dirs, files in os.walk(filesystem_path):
-                    for f in compose_files:
-                        if f in files:
-                            found = os.path.join(root, f)
-                            break
-                    if found:
-                        break
-
-            if not found:
-                session.close()
-                return jsonify({'error': 'No compose file found'}), 404
-
-            with open(found, 'r', encoding='utf-8') as fh:
-                content = fh.read()
-
-            session.close()
-            return jsonify({'path': found, 'content': content}), 200
-        except Exception as e:
-            logger.error(f"Error reading compose file for repository {repo_id}: {e}")
-            return jsonify({'error': str(e)}), 500
-
     
 
     @repositories_bp.route('/api/repositories/<int:repo_id>/git/status', methods=['GET'])
@@ -437,7 +394,7 @@ def init_routes(app, db_engine):
                 session.close()
                 return jsonify({'error': 'Not a git repository'}), 400
 
-            res = run_git_cmd(path, ['fetch', '--all'])
+            res = run_git_cmd(path, ['fetch', '--all'], ssh_password=repo.ssh_password)
             session.close()
             return jsonify(res), 200
         except Exception as e:
@@ -467,7 +424,7 @@ def init_routes(app, db_engine):
             if not branch:
                 branch = repo.default_branch or 'main'
 
-            res = run_git_cmd(path, ['pull', remote, branch])
+            res = run_git_cmd(path, ['pull', remote, branch], ssh_password=repo.ssh_password)
             session.close()
             return jsonify(res), 200
         except Exception as e:

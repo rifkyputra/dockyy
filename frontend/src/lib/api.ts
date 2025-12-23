@@ -127,13 +127,6 @@ export const repositoryApi = {
     if (!response.ok) throw new Error("Failed to get filesystem status");
     return response.json();
   },
-  getComposeFile: async (
-    id: number
-  ): Promise<{ path: string; content: string }> => {
-    const response = await fetch(`${API_BASE}/repositories/${id}/compose-file`);
-    if (!response.ok) throw new Error("Failed to get compose file");
-    return response.json();
-  },
 
   getComposeFiles: async (id: number): Promise<DockerComposeFile[]> => {
     const response = await fetch(

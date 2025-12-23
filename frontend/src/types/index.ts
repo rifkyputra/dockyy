@@ -14,6 +14,7 @@ export interface Repository {
   description?: string;
   webhook_url?: string;
   filesystem_path?: string;
+  ssh_password?: string;
   is_private: boolean;
   default_branch: string;
   created_at?: string;
@@ -27,17 +28,7 @@ export interface CreateRepositoryInput {
   description?: string;
   webhook_url?: string;
   filesystem_path?: string;
-  is_private?: boolean;
-  default_branch?: string;
-}
-
-export interface CreateRepositoryInput {
-  name: string;
-  owner: string;
-  url: string;
-  description?: string;
-  webhook_url?: string;
-  filesystem_path?: string;
+  ssh_password?: string;
   is_private?: boolean;
   default_branch?: string;
 }
@@ -49,6 +40,7 @@ export interface UpdateRepositoryInput {
   description?: string;
   webhook_url?: string;
   filesystem_path?: string;
+  ssh_password?: string;
   is_private?: boolean;
   default_branch?: string;
 }

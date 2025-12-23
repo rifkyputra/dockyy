@@ -1,7 +1,8 @@
 import os
 import subprocess
 import re
-from typing import List, Dict, Any
+import tempfile
+from typing import List, Dict, Any, Optional
 
 
 def check_git_repo(path: str) -> bool:
@@ -26,23 +27,65 @@ def check_git_repo(path: str) -> bool:
         return False
 
 
-def run_git_cmd(path: str, args: List[str], timeout: int = 30) -> Dict[str, Any]:
+def run_git_cmd(path: str, args: List[str], timeout: int = 30, ssh_password: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Run a git command with optional SSH password authentication.
+    
+    Args:
+        path: The repository path
+        args: Git command arguments
+        timeout: Command timeout in seconds
+        ssh_password: Optional SSH password for authentication
+    
+    Returns:
+        Dictionary with returncode, stdout, and stderr
+    """
     try:
+        env = os.environ.copy()
+        askpass_script = None
+        
+        # If SSH password is provided, create a temporary askpass script
+        if ssh_password:
+            # Create a temporary script that returns the password
+            askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
+            askpass_script.write('#!/bin/sh\n')
+            askpass_script.write(f'echo "{ssh_password}"\n')
+            askpass_script.close()
+            
+            # Make the script executable
+            os.chmod(askpass_script.name, 0o700)
+            
+            # Set environment variables for SSH password authentication
+            env['SSH_ASKPASS'] = askpass_script.name
+            env['SSH_ASKPASS_REQUIRE'] = 'force'
+            env['DISPLAY'] = ':0'  # Required for SSH_ASKPASS to work
+            env['GIT_SSH_COMMAND'] = 'ssh -o StrictHostKeyChecking=no'
+        
         result = subprocess.run(
             ['git', *args],
             cwd=path,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
+        
+        # Clean up the temporary askpass script
+        if askpass_script and os.path.exists(askpass_script.name):
+            os.unlink(askpass_script.name)
+        
         return {
             'returncode': result.returncode,
             'stdout': result.stdout,
             'stderr': result.stderr,
         }
     except subprocess.TimeoutExpired as e:
+        if askpass_script and os.path.exists(askpass_script.name):
+            os.unlink(askpass_script.name)
         return {'returncode': 124, 'stdout': '', 'stderr': f'Timeout: {e}'}
     except Exception as e:
+        if askpass_script and os.path.exists(askpass_script.name):
+            os.unlink(askpass_script.name)
         return {'returncode': 1, 'stdout': '', 'stderr': str(e)}
 
 
