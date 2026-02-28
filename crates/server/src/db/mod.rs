@@ -72,6 +72,15 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_deployments_repo ON deployments(repo_id);
             "
         )?;
+
+        // Idempotent column additions — errors are silently ignored when the
+        // column already exists (SQLite returns "duplicate column name").
+        let _ = conn.execute("ALTER TABLE repositories ADD COLUMN domain TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE repositories ADD COLUMN proxy_port INTEGER DEFAULT 3000",
+            [],
+        );
+
         tracing::info!("Database migrations complete");
         Ok(())
     }

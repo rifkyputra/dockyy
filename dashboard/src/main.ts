@@ -512,6 +512,8 @@ async function loadRepositoryDetail(el: HTMLElement) {
          </div>
          <div style="display:flex; gap:12px;">
            <button class="btn btn-primary" id="btn-clone-repo">${fsStatus.has_git_repo ? "Re-Clone" : "Clone Repository"}</button>
+           ${fsStatus.has_git_repo ? '<button class="btn btn-ghost" style="border:1px solid var(--border-color);" id="btn-pull-repo">Git Pull</button>' : ""}
+           ${fsStatus.has_git_repo ? '<button class="btn btn-ghost" style="border:1px solid var(--border-color);" id="btn-fetch-repo">Git Fetch</button>' : ""}
            ${fsStatus.has_docker_compose ? '<button class="btn btn-success" id="btn-compose-up">▶ Trigger Docker Compose</button>' : ""}
          </div>
       </div>
@@ -592,6 +594,40 @@ async function loadRepositoryDetail(el: HTMLElement) {
       } catch (err) {
         alert(err instanceof Error ? err.message : "Clone failed");
         btn.textContent = "Clone Repository";
+        btn.disabled = false;
+      }
+    });
+
+  document
+    .getElementById("btn-pull-repo")
+    ?.addEventListener("click", async (e) => {
+      const btn = e.target as HTMLButtonElement;
+      btn.textContent = "Pulling...";
+      btn.disabled = true;
+      try {
+        const res = await api.gitPull(currentRepoId!);
+        alert(res.message);
+        loadPage();
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "Pull failed");
+        btn.textContent = "Git Pull";
+        btn.disabled = false;
+      }
+    });
+
+  document
+    .getElementById("btn-fetch-repo")
+    ?.addEventListener("click", async (e) => {
+      const btn = e.target as HTMLButtonElement;
+      btn.textContent = "Fetching...";
+      btn.disabled = true;
+      try {
+        const res = await api.gitFetch(currentRepoId!);
+        alert(res.message);
+        loadPage();
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "Fetch failed");
+        btn.textContent = "Git Fetch";
         btn.disabled = false;
       }
     });
@@ -695,8 +731,14 @@ async function loadHealth(el: HTMLElement) {
   }
 
   const cpuPct = Math.round(m.cpu_usage_pct);
-  const memPct = m.mem_total_bytes > 0 ? Math.round((m.mem_used_bytes / m.mem_total_bytes) * 100) : 0;
-  const diskPct = m.disk_total_bytes > 0 ? Math.round((m.disk_used_bytes / m.disk_total_bytes) * 100) : 0;
+  const memPct =
+    m.mem_total_bytes > 0
+      ? Math.round((m.mem_used_bytes / m.mem_total_bytes) * 100)
+      : 0;
+  const diskPct =
+    m.disk_total_bytes > 0
+      ? Math.round((m.disk_used_bytes / m.disk_total_bytes) * 100)
+      : 0;
 
   const checkedAt = m.checked_at
     ? new Date(m.checked_at).toLocaleString()
@@ -910,7 +952,13 @@ function parseHash() {
       currentRepoId = id;
     }
   } else if (
-    ["containers", "repositories", "deployments", "health", "settings"].includes(hash)
+    [
+      "containers",
+      "repositories",
+      "deployments",
+      "health",
+      "settings",
+    ].includes(hash)
   ) {
     currentPage = hash;
     currentRepoId = null;

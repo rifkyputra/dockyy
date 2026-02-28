@@ -5,10 +5,11 @@ use crate::AppState;
 
 pub mod auth;
 pub mod containers;
+pub mod deployments;
 pub mod health;
+pub mod proxy;
 pub mod repositories;
 pub mod static_files;
-pub mod deployments;
 pub mod webhooks;
 
 pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -21,6 +22,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .merge(containers::routes())
         .merge(repositories::routes())
         .merge(deployments::routes())
+        .merge(proxy::routes())
         .merge(health::metrics_routes())
         .layer(axum::middleware::from_fn_with_state(
             state,

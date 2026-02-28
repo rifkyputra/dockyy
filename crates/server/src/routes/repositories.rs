@@ -23,6 +23,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/{id}/readme", get(get_readme))
         .route("/repositories/{id}/compose-files", get(get_compose_files))
         .route("/repositories/{id}/clone", post(clone_repository))
+        .route("/repositories/{id}/pull", post(pull_repository))
+        .route("/repositories/{id}/fetch", post(fetch_repository))
         .route("/repositories/{id}/docker-compose-up", post(docker_compose_up))
 }
 
@@ -34,7 +36,8 @@ async fn list_repositories(
         .with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, owner, url, description, webhook_url, filesystem_path,
-                        ssh_password, is_private, default_branch, created_at, updated_at
+                        ssh_password, is_private, default_branch, domain, proxy_port,
+                        created_at, updated_at
                  FROM repositories ORDER BY updated_at DESC",
             )?;
 
@@ -51,8 +54,10 @@ async fn list_repositories(
                         ssh_password: row.get(7)?,
                         is_private: row.get::<_, i64>(8)? != 0,
                         default_branch: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
+                        domain: row.get(10)?,
+                        proxy_port: row.get(11)?,
+                        created_at: row.get(12)?,
+                        updated_at: row.get(13)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -77,7 +82,8 @@ async fn get_repository(
         .with_conn(|conn| {
             let repo = conn.query_row(
                 "SELECT id, name, owner, url, description, webhook_url, filesystem_path,
-                        ssh_password, is_private, default_branch, created_at, updated_at
+                        ssh_password, is_private, default_branch, domain, proxy_port,
+                        created_at, updated_at
                  FROM repositories WHERE id = ?1",
                 [id],
                 |row| {
@@ -92,8 +98,10 @@ async fn get_repository(
                         ssh_password: row.get(7)?,
                         is_private: row.get::<_, i64>(8)? != 0,
                         default_branch: row.get(9)?,
-                        created_at: row.get(10)?,
-                        updated_at: row.get(11)?,
+                        domain: row.get(10)?,
+                        proxy_port: row.get(11)?,
+                        created_at: row.get(12)?,
+                        updated_at: row.get(13)?,
                     })
                 },
             )?;
@@ -117,8 +125,9 @@ async fn create_repository(
         .with_conn(|conn| {
             conn.execute(
                 "INSERT INTO repositories (name, owner, url, description, webhook_url,
-                    filesystem_path, ssh_password, is_private, default_branch)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    filesystem_path, ssh_password, is_private, default_branch,
+                    domain, proxy_port)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     body.name,
                     body.owner,
@@ -129,6 +138,8 @@ async fn create_repository(
                     body.ssh_password,
                     body.is_private as i64,
                     body.default_branch,
+                    body.domain,
+                    body.proxy_port,
                 ],
             )?;
             let id = conn.last_insert_rowid();
@@ -196,6 +207,14 @@ async fn update_repository(
                 sets.push("default_branch = ?");
                 params.push(Box::new(branch.clone()));
             }
+            if let Some(ref d) = body.domain {
+                sets.push("domain = ?");
+                params.push(Box::new(d.clone()));
+            }
+            if let Some(pp) = body.proxy_port {
+                sets.push("proxy_port = ?");
+                params.push(Box::new(pp));
+            }
 
             if sets.is_empty() {
                 anyhow::bail!("No fields to update");
@@ -254,8 +273,20 @@ async fn get_filesystem_status(
     let path = std::path::Path::new(&repo_dir);
     
     let has_git_repo = path.join(".git").exists();
-    let has_docker_compose = path.join("docker-compose.yml").exists() || path.join("docker-compose.yaml").exists();
-    
+    let has_docker_compose = std::fs::read_dir(path).map(|mut entries| {
+        entries.any(|entry| {
+            if let Ok(entry) = entry {
+                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    return false;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                (name.starts_with("docker-compose") || name.starts_with("compose"))
+                    && (name.ends_with(".yml") || name.ends_with(".yaml"))
+            } else {
+                false
+            }
+        })
+    }).unwrap_or(false);
     let absolute_path = match std::fs::canonicalize(path) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => {
@@ -300,15 +331,34 @@ async fn get_compose_files(
     let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
     let path = std::path::Path::new(&repo_dir);
     
-    let compose_paths = ["docker-compose.yml", "docker-compose.yaml"];
     let mut files = Vec::new();
     
-    for cp in compose_paths.iter() {
-        if let Ok(c) = std::fs::read_to_string(path.join(cp)) {
-            files.push(json!({
-                "path": cp,
-                "content": c
-            }));
+    if let Ok(entries) = std::fs::read_dir(path) {
+        let mut paths: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    (name.starts_with("docker-compose") || name.starts_with("compose"))
+                        && (name.ends_with(".yml") || name.ends_with(".yaml"))
+                } else {
+                    false
+                }
+            })
+            .collect();
+            
+        paths.sort();
+        
+        for cp in paths {
+            if let Ok(c) = std::fs::read_to_string(&cp) {
+                if let Some(name) = cp.file_name().and_then(|n| n.to_str()) {
+                    files.push(json!({
+                        "path": name,
+                        "content": c
+                    }));
+                }
+            }
         }
     }
     
@@ -393,4 +443,108 @@ async fn docker_compose_up(
     }
     
     Ok(Json(json!({"message": "Deployment started with docker-compose"})))
+}
+
+async fn pull_repository(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let repo = get_repository(State(state.clone()), Path(id)).await?.0;
+    
+    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
+    if !std::path::Path::new(&repo_dir).join(".git").exists() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Repository not cloned"}))));
+    }
+    
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(&repo_dir);
+    
+    let mut temp_key_path = None;
+    if let Some(ssh_key) = &repo.ssh_password {
+        if !ssh_key.trim().is_empty() {
+            let key_path = format!("{}/repos/{}_id_rsa", state.config.data_dir, id);
+            std::fs::write(&key_path, ssh_key.trim()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
+                perms.set_mode(0o600);
+                std::fs::set_permissions(&key_path, perms).unwrap();
+            }
+            cmd.env("GIT_SSH_COMMAND", format!("ssh -i {} -o StrictHostKeyChecking=no", key_path));
+            temp_key_path = Some(key_path);
+        } else {
+            cmd.env("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no");
+        }
+    } else {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no");
+    }
+
+    let output = cmd
+        .arg("pull")
+        .output()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+    if let Some(key_path) = temp_key_path {
+        let _ = std::fs::remove_file(key_path);
+    }
+        
+    if !output.status.success() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()}))));
+    }
+    
+    Ok(Json(json!({"message": "Repository pulled successfully"})))
+}
+
+async fn fetch_repository(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let repo = get_repository(State(state.clone()), Path(id)).await?.0;
+    
+    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
+    if !std::path::Path::new(&repo_dir).join(".git").exists() {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Repository not cloned"}))));
+    }
+    
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(&repo_dir);
+    
+    let mut temp_key_path = None;
+    if let Some(ssh_key) = &repo.ssh_password {
+        if !ssh_key.trim().is_empty() {
+            let key_path = format!("{}/repos/{}_id_rsa", state.config.data_dir, id);
+            std::fs::write(&key_path, ssh_key.trim()).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
+                perms.set_mode(0o600);
+                std::fs::set_permissions(&key_path, perms).unwrap();
+            }
+            cmd.env("GIT_SSH_COMMAND", format!("ssh -i {} -o StrictHostKeyChecking=no", key_path));
+            temp_key_path = Some(key_path);
+        } else {
+            cmd.env("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no");
+        }
+    } else {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no");
+    }
+
+    let output = cmd
+        .arg("fetch")
+        .output()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        
+    if let Some(key_path) = temp_key_path {
+        let _ = std::fs::remove_file(key_path);
+    }
+        
+    if !output.status.success() {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()}))));
+    }
+    
+    Ok(Json(json!({"message": "Repository fetched successfully"})))
 }

@@ -21,9 +21,7 @@ Daisy UI: <https://daisyui.com/llms.txt>
 
 ### BE
 
-use Flask.
-use uv as package manager and virtual env.
-use alembic for migration
+use RUST
 
 ## Rules
 

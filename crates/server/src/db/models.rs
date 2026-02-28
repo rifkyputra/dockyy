@@ -12,6 +12,10 @@ pub struct Repository {
     pub ssh_password: Option<String>,
     pub is_private: bool,
     pub default_branch: String,
+    /// Domain used for automatic reverse-proxy routing via Traefik.
+    pub domain: Option<String>,
+    /// Internal port the container listens on (used by Traefik; default 3000).
+    pub proxy_port: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -29,6 +33,8 @@ pub struct CreateRepository {
     pub is_private: bool,
     #[serde(default = "default_branch")]
     pub default_branch: String,
+    pub domain: Option<String>,
+    pub proxy_port: Option<i64>,
 }
 
 fn default_branch() -> String {
@@ -46,6 +52,8 @@ pub struct UpdateRepository {
     pub ssh_password: Option<String>,
     pub is_private: Option<bool>,
     pub default_branch: Option<String>,
+    pub domain: Option<String>,
+    pub proxy_port: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

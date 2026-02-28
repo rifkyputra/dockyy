@@ -97,6 +97,14 @@ export const api = {
     request<{ message: string }>(`/repositories/${id}/clone`, {
       method: "POST",
     }),
+  gitPull: (id: number) =>
+    request<{ message: string }>(`/repositories/${id}/pull`, {
+      method: "POST",
+    }),
+  gitFetch: (id: number) =>
+    request<{ message: string }>(`/repositories/${id}/fetch`, {
+      method: "POST",
+    }),
   dockerComposeUp: (id: number) =>
     request<{ message: string }>(`/repositories/${id}/docker-compose-up`, {
       method: "POST",

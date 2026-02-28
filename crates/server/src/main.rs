@@ -12,6 +12,7 @@ mod services;
 pub struct AppState {
     pub db: db::Database,
     pub docker: services::docker::DockerService,
+    pub traefik: services::traefik::TraefikService,
     pub config: AppConfig,
     pub metrics: services::monitor::MetricsState,
 }
@@ -23,6 +24,8 @@ pub struct AppConfig {
     pub host: String,
     pub port: u16,
     pub data_dir: String,
+    /// Host port Traefik listens on for HTTP traffic (default 80).
+    pub traefik_http_port: u16,
 }
 
 #[tokio::main]
@@ -53,6 +56,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "3000".into())
         .parse()?;
 
+    let traefik_http_port: u16 = std::env::var("TRAEFIK_HTTP_PORT")
+        .unwrap_or_else(|_| "80".into())
+        .parse()?;
+
     // Initialize database
     let db_path = format!("{}/dockyy.db", &data_dir);
     let database = db::Database::new(&db_path)?;
@@ -63,6 +70,11 @@ async fn main() -> Result<()> {
     let docker = services::docker::DockerService::new().await?;
     tracing::info!("Docker client connected");
 
+    // Initialize Traefik service (shares the Docker socket)
+    let traefik = services::traefik::TraefikService::new(
+        bollard::Docker::connect_with_local_defaults()?,
+    );
+
     let config = AppConfig {
         jwt_secret,
         admin_username,
@@ -70,14 +82,26 @@ async fn main() -> Result<()> {
         host: host.clone(),
         port,
         data_dir,
+        traefik_http_port,
     };
 
     let state = Arc::new(AppState {
         db: database,
         docker,
+        traefik,
         config,
         metrics: services::monitor::new_metrics_state(),
     });
+
+    // Ensure Traefik sidecar is running (non-fatal — log and continue)
+    if let Err(e) = state.traefik.ensure_traefik(state.config.traefik_http_port).await {
+        tracing::warn!("Could not start Traefik sidecar: {}", e);
+    } else {
+        tracing::info!(
+            "Traefik reverse proxy ready on port {}",
+            state.config.traefik_http_port
+        );
+    }
 
     // Spawn job worker
     tokio::spawn(services::worker::run_worker(state.clone()));
@@ -98,7 +122,7 @@ async fn main() -> Result<()> {
 
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("🚀 Dockyy server listening on http://{}", addr);
+    tracing::info!("Dockyy server listening on http://{}", addr);
 
     axum::serve(listener, app).await?;
     Ok(())

@@ -4,6 +4,7 @@ use tokio::time::{sleep, Duration};
 use tokio::process::Command;
 use crate::AppState;
 use crate::db::models::{Job, Repository};
+use crate::services::traefik::{TraefikService, TRAEFIK_NETWORK};
 use serde_json::Value;
 
 pub async fn run_worker(state: Arc<AppState>) {
@@ -96,7 +97,9 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
     // 1. Get repository info
     let repo = state.db.with_conn(|conn| {
         let repo = conn.query_row(
-            "SELECT id, name, owner, url, description, webhook_url, filesystem_path, ssh_password, is_private, default_branch, created_at, updated_at 
+            "SELECT id, name, owner, url, description, webhook_url, filesystem_path,
+                    ssh_password, is_private, default_branch, domain, proxy_port,
+                    created_at, updated_at
              FROM repositories WHERE id = ?1",
             [repo_id],
             |row| {
@@ -111,8 +114,10 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
                     ssh_password: row.get(7)?,
                     is_private: row.get::<_, i64>(8)? != 0,
                     default_branch: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    domain: row.get(10)?,
+                    proxy_port: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                 })
             }
         )?;
@@ -240,39 +245,67 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
     };
 
     // 5. Deploy / Start container
-    // Stop old container if exists
     let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
     let _ = state.docker.stop_container(&container_name).await;
     let _ = state.docker.remove_container(&container_name, true).await;
 
-    // Start new container
-    // For simplicity, we'll start it with a basic config.
-    // In a real PaaS, we'd read configuration for ports, env, etc.
+    // Ensure the shared proxy network exists before running the container
+    state.traefik.ensure_network().await?;
+
     tracing::info!("Starting container {}", container_name);
-    
-    // Using bollard for starting is complex to match a generic run. 
-    // We'll just use a direct Docker CLI command for now to be robust with various image types.
-    let run_output = Command::new("docker")
+
+    let mut run_cmd = Command::new("docker");
+    run_cmd
         .arg("run")
         .arg("-d")
         .arg("--name")
         .arg(&container_name)
+        .arg("--network")
+        .arg(TRAEFIK_NETWORK)
         .arg("--restart")
-        .arg("always")
-        .arg(&image_tag)
-        .output().await?;
+        .arg("always");
+
+    // Attach Traefik routing labels when a domain is configured
+    if let Some(ref domain) = repo.domain {
+        let proxy_port = repo.proxy_port.unwrap_or(3000) as u16;
+        tracing::info!(
+            "Attaching Traefik route: {} -> {}:{}",
+            domain,
+            container_name,
+            proxy_port
+        );
+        let labels = TraefikService::container_labels(&container_name, domain, proxy_port);
+        for (k, v) in &labels {
+            run_cmd.arg("--label").arg(format!("{}={}", k, v));
+        }
+    }
+
+    run_cmd.arg(&image_tag);
+
+    let run_output = run_cmd.output().await?;
 
     if !run_output.status.success() {
-        return Err(anyhow::anyhow!("Docker run failed: {}", String::from_utf8_lossy(&run_output.stderr)));
+        return Err(anyhow::anyhow!(
+            "Docker run failed: {}",
+            String::from_utf8_lossy(&run_output.stderr)
+        ));
     }
-    
-    let container_id = String::from_utf8_lossy(&run_output.stdout).trim().to_string();
 
-    // 6. Update deployment record
+    let container_id = String::from_utf8_lossy(&run_output.stdout)
+        .trim()
+        .to_string();
+
+    // 6. Update deployment record (persist domain for reference)
+    let domain_val = repo.domain.clone();
+    let port_val = repo.proxy_port;
     state.db.with_conn(|conn| {
         conn.execute(
-            "UPDATE deployments SET status = 'success', container_id = ?2, image_name = ?3, build_log = ?4, updated_at = datetime('now') WHERE id = ?1",
-            rusqlite::params![deployment_id, container_id, image_tag, build_log]
+            "UPDATE deployments
+             SET status = 'success', container_id = ?2, image_name = ?3,
+                 build_log = ?4, domain = ?5, port = ?6,
+                 updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![deployment_id, container_id, image_tag, build_log, domain_val, port_val]
         )?;
         Ok(())
     })?;
