@@ -1,13 +1,16 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::db::models::{CreateRepository, Repository, UpdateRepository};
+use crate::db::models::{
+    CreateRepository, EnvVar, ImportFromCompose, Repository, UpdateEnvVarValue, UpdateRepository,
+    UpsertEnvVar,
+};
 use crate::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -26,6 +29,19 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/{id}/pull", post(pull_repository))
         .route("/repositories/{id}/fetch", post(fetch_repository))
         .route("/repositories/{id}/docker-compose-up", post(docker_compose_up))
+        // Env vars CRUD
+        .route(
+            "/repositories/{id}/env-vars",
+            get(list_env_vars).post(upsert_env_var),
+        )
+        .route(
+            "/repositories/{id}/env-vars/{var_id}",
+            put(update_env_var).delete(delete_env_var),
+        )
+        .route(
+            "/repositories/{id}/env-vars/import-from-compose",
+            post(import_env_vars_from_compose),
+        )
 }
 
 async fn list_repositories(
@@ -423,9 +439,42 @@ async fn docker_compose_up(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let repo = get_repository(State(state.clone()), Path(id)).await?.0;
     let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
-    
+
+    // Write stored env vars to .env file so docker compose picks them up
+    let env_vars = state
+        .db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT key, value FROM repo_env_vars WHERE repo_id = ?1 ORDER BY key",
+            )?;
+            let rows = stmt
+                .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+
+    if !env_vars.is_empty() {
+        let env_content = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(format!("{repo_dir}/.env"), env_content).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to write .env: {e}")})),
+            )
+        })?;
+    }
+
     let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
-    
+
     let output = tokio::process::Command::new("docker")
         .arg("compose")
         .arg("-p")
@@ -436,13 +485,240 @@ async fn docker_compose_up(
         .current_dir(&repo_dir)
         .output()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
-        
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+
     if !output.status.success() {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()}))));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()})),
+        ));
     }
-    
+
     Ok(Json(json!({"message": "Deployment started with docker-compose"})))
+}
+
+// ── Env vars ──────────────────────────────────────────────────────────────────
+
+async fn list_env_vars(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<EnvVar>>, (StatusCode, Json<Value>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, repo_id, key, value, created_at, updated_at
+                 FROM repo_env_vars WHERE repo_id = ?1 ORDER BY key",
+            )?;
+            let rows = stmt
+                .query_map([id], |row| {
+                    Ok(EnvVar {
+                        id: row.get(0)?,
+                        repo_id: row.get(1)?,
+                        key: row.get(2)?,
+                        value: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })
+}
+
+async fn upsert_env_var(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpsertEnvVar>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO repo_env_vars (repo_id, key, value)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(repo_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                rusqlite::params![id, body.key, body.value],
+            )?;
+            let row_id = conn.last_insert_rowid();
+            Ok(row_id)
+        })
+        .map(|row_id| {
+            (
+                StatusCode::CREATED,
+                Json(json!({"id": row_id, "message": "Env var saved"})),
+            )
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })
+}
+
+async fn update_env_var(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, var_id)): Path<(i64, i64)>,
+    Json(body): Json<UpdateEnvVarValue>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE repo_env_vars SET value = ?1, updated_at = datetime('now')
+                 WHERE id = ?2 AND repo_id = ?3",
+                rusqlite::params![body.value, var_id, repo_id],
+            )?;
+            if n == 0 {
+                anyhow::bail!("Env var not found");
+            }
+            Ok(())
+        })
+        .map(|_| Json(json!({"message": "Env var updated"})))
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": e.to_string()})),
+            )
+        })
+}
+
+async fn delete_env_var(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, var_id)): Path<(i64, i64)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state
+        .db
+        .with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM repo_env_vars WHERE id = ?1 AND repo_id = ?2",
+                rusqlite::params![var_id, repo_id],
+            )?;
+            if n == 0 {
+                anyhow::bail!("Env var not found");
+            }
+            Ok(())
+        })
+        .map(|_| Json(json!({"message": "Env var deleted"})))
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": e.to_string()})),
+            )
+        })
+}
+
+async fn import_env_vars_from_compose(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<ImportFromCompose>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
+
+    // Validate compose file name (must not contain path separators)
+    if body.compose_file.contains('/') || body.compose_file.contains('\\') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Invalid compose file name"})),
+        ));
+    }
+
+    let compose_path = std::path::Path::new(&repo_dir).join(&body.compose_file);
+    let content = std::fs::read_to_string(&compose_path).map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Cannot read compose file: {e}")})),
+        )
+    })?;
+
+    let keys = extract_env_keys_from_compose(&content);
+
+    let inserted = state
+        .db
+        .with_conn(|conn| {
+            let mut count = 0usize;
+            for key in &keys {
+                // Only insert if the key does not already exist (preserve existing values)
+                let n = conn.execute(
+                    "INSERT INTO repo_env_vars (repo_id, key, value)
+                     VALUES (?1, ?2, '')
+                     ON CONFLICT(repo_id, key) DO NOTHING",
+                    rusqlite::params![id, key],
+                )?;
+                count += n;
+            }
+            Ok(count)
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
+
+    Ok(Json(
+        json!({"message": format!("Imported {} new env vars ({} total keys found)", inserted, keys.len()), "keys": keys}),
+    ))
+}
+
+/// Parse a docker-compose YAML and collect all environment variable keys across all services.
+fn extract_env_keys_from_compose(content: &str) -> Vec<String> {
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
+        return vec![];
+    };
+
+    let mut keys = std::collections::BTreeSet::new();
+
+    let Some(services) = doc.get("services").and_then(|s| s.as_mapping()) else {
+        return vec![];
+    };
+
+    for (_svc_name, svc_val) in services {
+        let Some(env) = svc_val.get("environment") else {
+            continue;
+        };
+
+        match env {
+            // environment as a sequence: ["KEY=VALUE", "KEY_ONLY"]
+            serde_yaml::Value::Sequence(seq) => {
+                for item in seq {
+                    if let Some(s) = item.as_str() {
+                        let key = s.splitn(2, '=').next().unwrap_or(s).trim().to_string();
+                        if !key.is_empty() {
+                            keys.insert(key);
+                        }
+                    }
+                }
+            }
+            // environment as a mapping: KEY: VALUE
+            serde_yaml::Value::Mapping(map) => {
+                for (k, _v) in map {
+                    if let Some(key) = k.as_str() {
+                        let key = key.trim().to_string();
+                        if !key.is_empty() {
+                            keys.insert(key);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    keys.into_iter().collect()
 }
 
 async fn pull_repository(

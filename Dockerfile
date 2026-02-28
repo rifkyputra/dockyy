@@ -7,13 +7,13 @@ COPY dashboard/ .
 RUN npm run build
 
 # ── Build server ──
-FROM rust:1.84-alpine AS server
+FROM rust:1.88-alpine AS server
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/ crates/
 COPY --from=dashboard /app/dashboard/dist/ dashboard/dist/
-RUN cargo build --release --target x86_64-unknown-linux-musl 2>/dev/null || cargo build --release
+RUN cargo build --release
 
 # ── Runtime ──
 FROM alpine:3.20

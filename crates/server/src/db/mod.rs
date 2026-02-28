@@ -81,6 +81,20 @@ impl Database {
             [],
         );
 
+        // Environment variables per repository
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS repo_env_vars (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id     INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                key         TEXT NOT NULL,
+                value       TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(repo_id, key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_env_vars_repo ON repo_env_vars(repo_id);",
+        )?;
+
         tracing::info!("Database migrations complete");
         Ok(())
     }

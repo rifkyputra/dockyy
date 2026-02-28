@@ -1,5 +1,5 @@
 import "./style.css";
-import { api, type Container, type ServerMetrics } from "./api";
+import { api, type Container, type ServerMetrics, type ProxyRoute, type EnvVar } from "./api";
 
 // ── State ──
 let currentPage = "containers";
@@ -94,6 +94,9 @@ function renderLayout(): string {
           <button class="nav-item ${currentPage === "deployments" ? "active" : ""}" data-page="deployments">
             <span class="icon">🚀</span> Deployments
           </button>
+          <button class="nav-item ${currentPage === "proxy" ? "active" : ""}" data-page="proxy">
+            <span class="icon">🔀</span> Proxy
+          </button>
           <div class="nav-section">System</div>
           <button class="nav-item ${currentPage === "health" ? "active" : ""}" data-page="health">
             <span class="icon">🏥</span> Health
@@ -127,6 +130,7 @@ function pageTitle(): string {
     repositories: "Repositories",
     repository_detail: "Repository Details",
     deployments: "Deployments",
+    proxy: "Reverse Proxy",
     health: "Server Health",
     settings: "Settings",
   };
@@ -168,6 +172,9 @@ async function loadPage() {
         break;
       case "deployments":
         await loadDeployments(content);
+        break;
+      case "proxy":
+        await loadProxy(content);
         break;
       case "health":
         await loadHealth(content);
@@ -324,7 +331,9 @@ async function loadRepositories(el: HTMLElement) {
               <div class="container-image">${esc(r.url)}</div>
             </div>
             <div><span class="badge ${r.is_private ? "badge-warning" : "badge-success"}">${r.is_private ? "Private" : "Public"}</span></div>
-            <div><span class="badge badge-info">${esc(r.default_branch)}</span></div>
+            <div>
+              ${r.domain ? `<span class="badge badge-info" title="Proxy domain">🔀 ${esc(r.domain)}</span>` : `<span style="font-size:12px; color:var(--text-muted);">No proxy</span>`}
+            </div>
             <div class="container-actions">
               <button class="btn btn-danger btn-sm act-delete-repo" data-id="${r.id}">Delete</button>
             </div>
@@ -395,6 +404,17 @@ function showAddRepoModal() {
               <input type="checkbox" id="repo-private">
               <label class="form-label" style="margin:0;">Private Repository</label>
             </div>
+            <div style="border-top:1px solid var(--border-color); padding-top:10px; margin-top:4px;">
+              <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">Optional — reverse proxy settings</div>
+              <div class="form-group">
+                <label class="form-label">Domain</label>
+                <input class="form-input" id="repo-domain" placeholder="app.example.com">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Container Port</label>
+                <input class="form-input" id="repo-proxy-port" type="number" min="1" max="65535" value="3000" style="max-width:120px;">
+              </div>
+            </div>
             <div id="add-repo-error" class="form-error" style="display:none; color:red;"></div>
             <button class="btn btn-primary" type="submit">Create</button>
           </form>
@@ -429,6 +449,9 @@ function showAddRepoModal() {
         document.getElementById("repo-private") as HTMLInputElement
       ).checked;
 
+      const domain = (document.getElementById("repo-domain") as HTMLInputElement).value.trim();
+      const proxyPortRaw = (document.getElementById("repo-proxy-port") as HTMLInputElement).value;
+      const proxyPort = proxyPortRaw ? parseInt(proxyPortRaw) : null;
       const errorEl = document.getElementById("add-repo-error")!;
       try {
         await api.createRepository({
@@ -438,6 +461,8 @@ function showAddRepoModal() {
           default_branch: branch,
           ssh_password: sshPassword || null,
           is_private: isPrivate,
+          domain: domain || null,
+          proxy_port: proxyPort && !isNaN(proxyPort) ? proxyPort : null,
         });
         root.innerHTML = "";
         loadPage();
@@ -458,7 +483,10 @@ async function loadRepositoryDetail(el: HTMLElement) {
     return;
   }
   const repo = await api.getRepository(currentRepoId);
-  const deps = await api.listDeploymentsByRepo(currentRepoId);
+  const [deps, envVars] = await Promise.all([
+    api.listDeploymentsByRepo(currentRepoId),
+    api.listEnvVars(currentRepoId),
+  ]);
 
   let fsStatus = {
     has_git_repo: false,
@@ -540,6 +568,85 @@ async function loadRepositoryDetail(el: HTMLElement) {
     `,
       )
       .join("")}
+
+    <div class="card" style="margin-bottom: 16px;">
+      <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 class="card-title">Environment Variables</h3>
+        <span style="font-size:13px; color:var(--text-muted);">Injected as .env on compose up</span>
+      </div>
+      <div class="card-body">
+        ${composeFiles.length > 0 ? `
+        <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span style="font-size:13px; color:var(--text-muted);">Import keys from:</span>
+          ${composeFiles.map(cf => `
+            <button class="btn btn-ghost btn-sm btn-import-compose" data-file="${esc(cf.path)}" style="border:1px solid var(--border-color);">
+              📄 ${esc(cf.path)}
+            </button>`).join("")}
+        </div>` : ""}
+        <div id="env-vars-list" style="margin-bottom:12px;">
+          ${envVars.length === 0
+            ? `<div style="font-size:13px; color:var(--text-muted); padding:8px 0;">No environment variables defined.</div>`
+            : `<table style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead>
+                  <tr style="border-bottom:1px solid var(--border-color);">
+                    <th style="text-align:left; padding:6px 8px; color:var(--text-muted); font-weight:500;">Key</th>
+                    <th style="text-align:left; padding:6px 8px; color:var(--text-muted); font-weight:500;">Value</th>
+                    <th style="width:80px;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${envVars.map((v: EnvVar) => `
+                  <tr data-var-id="${v.id}" style="border-bottom:1px solid var(--border-color);">
+                    <td style="padding:6px 8px;"><code>${esc(v.key)}</code></td>
+                    <td style="padding:6px 8px;">
+                      <input class="form-input env-value-input" data-var-id="${v.id}" value="${esc(v.value)}" style="font-size:12px; padding:4px 8px; font-family:monospace;" />
+                    </td>
+                    <td style="padding:6px 8px; white-space:nowrap;">
+                      <button class="btn btn-ghost btn-sm btn-save-env" data-var-id="${v.id}" title="Save">💾</button>
+                      <button class="btn btn-ghost btn-sm btn-delete-env" data-var-id="${v.id}" title="Delete" style="color:#ef4444;">✕</button>
+                    </td>
+                  </tr>`).join("")}
+                </tbody>
+              </table>`
+          }
+        </div>
+        <form id="add-env-var-form" style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+          <div class="form-group" style="margin:0; flex:1; min-width:140px;">
+            <label class="form-label" style="font-size:12px;">Key</label>
+            <input class="form-input" id="new-env-key" placeholder="MY_VAR" style="font-family:monospace; font-size:13px;" />
+          </div>
+          <div class="form-group" style="margin:0; flex:2; min-width:180px;">
+            <label class="form-label" style="font-size:12px;">Value</label>
+            <input class="form-input" id="new-env-value" placeholder="secret_value" style="font-family:monospace; font-size:13px;" />
+          </div>
+          <button class="btn btn-primary btn-sm" type="submit">+ Add</button>
+        </form>
+        <div id="env-vars-msg" style="display:none; font-size:13px; margin-top:8px;"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 16px;">
+      <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 class="card-title">Reverse Proxy</h3>
+        ${repo.domain ? `<span class="badge badge-success">Active</span>` : `<span class="badge badge-warning">Not configured</span>`}
+      </div>
+      <div class="card-body">
+        <form id="proxy-settings-form" style="display:flex; flex-direction:column; gap:10px; max-width:480px;">
+          <div class="form-group">
+            <label class="form-label">Domain</label>
+            <input class="form-input" id="proxy-domain" placeholder="app.example.com" value="${esc(repo.domain || "")}">
+            <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">Leave empty to disable routing. Redeploy after changing.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Container Port</label>
+            <input class="form-input" id="proxy-port" type="number" min="1" max="65535" value="${repo.proxy_port ?? 3000}" style="max-width:120px;">
+            <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">Internal port the app listens on inside the container.</div>
+          </div>
+          <div id="proxy-settings-msg" style="display:none; font-size:13px;"></div>
+          <div><button class="btn btn-primary" type="submit">Save Proxy Settings</button></div>
+        </form>
+      </div>
+    </div>
 
     <div class="card">
       <div class="card-header"><h3 class="card-title">Deployments</h3></div>
@@ -648,11 +755,97 @@ async function loadRepositoryDetail(el: HTMLElement) {
       }
     });
 
+  document.getElementById("proxy-settings-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const domain = (document.getElementById("proxy-domain") as HTMLInputElement).value.trim();
+    const port = parseInt((document.getElementById("proxy-port") as HTMLInputElement).value);
+    const msgEl = document.getElementById("proxy-settings-msg")!;
+    try {
+      await api.updateRepository(repo.id, {
+        domain: domain || null,
+        proxy_port: isNaN(port) ? null : port,
+      });
+      msgEl.style.display = "block";
+      msgEl.style.color = "var(--success, #22c55e)";
+      msgEl.textContent = "Saved. Redeploy to apply the new routing.";
+    } catch (err) {
+      msgEl.style.display = "block";
+      msgEl.style.color = "red";
+      msgEl.textContent = err instanceof Error ? err.message : "Save failed";
+    }
+  });
+
   el.querySelectorAll(".act-redeploy").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = Number((btn as HTMLElement).dataset.id);
       await api.redeploy(id);
       loadPage();
+    });
+  });
+
+  // ── Env vars bindings ──
+  const envMsg = () => document.getElementById("env-vars-msg")!;
+  const showEnvMsg = (text: string, ok = true) => {
+    const el2 = envMsg();
+    el2.style.display = "block";
+    el2.style.color = ok ? "var(--success, #22c55e)" : "red";
+    el2.textContent = text;
+    setTimeout(() => { el2.style.display = "none"; }, 3000);
+  };
+
+  // Add new env var
+  document.getElementById("add-env-var-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = (document.getElementById("new-env-key") as HTMLInputElement).value.trim();
+    const value = (document.getElementById("new-env-value") as HTMLInputElement).value;
+    if (!key) return;
+    try {
+      await api.upsertEnvVar(currentRepoId!, key, value);
+      loadPage();
+    } catch (err) {
+      showEnvMsg(err instanceof Error ? err.message : "Failed to add", false);
+    }
+  });
+
+  // Save (update) existing env var
+  el.querySelectorAll(".btn-save-env").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const varId = Number((btn as HTMLElement).dataset.varId);
+      const input = el.querySelector(`.env-value-input[data-var-id="${varId}"]`) as HTMLInputElement;
+      try {
+        await api.updateEnvVar(currentRepoId!, varId, input.value);
+        showEnvMsg("Saved");
+      } catch (err) {
+        showEnvMsg(err instanceof Error ? err.message : "Save failed", false);
+      }
+    });
+  });
+
+  // Delete env var
+  el.querySelectorAll(".btn-delete-env").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const varId = Number((btn as HTMLElement).dataset.varId);
+      if (!confirm("Delete this env var?")) return;
+      try {
+        await api.deleteEnvVar(currentRepoId!, varId);
+        loadPage();
+      } catch (err) {
+        showEnvMsg(err instanceof Error ? err.message : "Delete failed", false);
+      }
+    });
+  });
+
+  // Import from compose file
+  el.querySelectorAll(".btn-import-compose").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const file = (btn as HTMLElement).dataset.file!;
+      try {
+        const res = await api.importEnvVarsFromCompose(currentRepoId!, file);
+        showEnvMsg(res.message);
+        loadPage();
+      } catch (err) {
+        showEnvMsg(err instanceof Error ? err.message : "Import failed", false);
+      }
     });
   });
 }
@@ -718,6 +911,86 @@ async function loadDeployments(el: HTMLElement) {
   });
 }
 
+// ── Proxy page ──
+async function loadProxy(el: HTMLElement) {
+  const [status, routes] = await Promise.all([
+    api.proxyStatus(),
+    api.proxyRoutes(),
+  ]);
+
+  el.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon ${status.traefik_running ? "green" : "yellow"}">🔀</div>
+        <div class="stat-value" style="font-size:1.1rem;">${status.traefik_running ? "Running" : "Stopped"}</div>
+        <div class="stat-label">Traefik</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon blue">🌐</div>
+        <div class="stat-value">${routes.length}</div>
+        <div class="stat-label">Active Routes</div>
+      </div>
+      <div class="stat-card" style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:16px;">
+        <div style="font-size:13px; color:var(--text-muted);">Container</div>
+        <code style="font-size:12px;">${esc(status.container)}</code>
+        <div style="font-size:13px; color:var(--text-muted); margin-top:4px;">Network</div>
+        <code style="font-size:12px;">${esc(status.network)}</code>
+      </div>
+      <div class="stat-card" style="display:flex; align-items:center; justify-content:center;">
+        <button class="btn ${status.traefik_running ? "btn-ghost" : "btn-primary"}" id="btn-ensure-traefik">
+          ${status.traefik_running ? "↻ Restart" : "▶ Start Traefik"}
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">Active Routes</h2></div>
+      <div class="card-body" style="padding:0;">
+        ${routes.length === 0
+          ? `<div style="padding:24px; text-align:center; color:var(--text-muted);">
+               No active routes. Set a <strong>domain</strong> on a repository and deploy to create one.
+             </div>`
+          : `<table style="width:100%; border-collapse:collapse; font-size:14px;">
+               <thead>
+                 <tr style="border-bottom:1px solid var(--border-color); text-align:left;">
+                   <th style="padding:10px 16px; color:var(--text-muted); font-weight:500;">Container</th>
+                   <th style="padding:10px 16px; color:var(--text-muted); font-weight:500;">Domain</th>
+                   <th style="padding:10px 16px; color:var(--text-muted); font-weight:500;">Port</th>
+                   <th style="padding:10px 16px; color:var(--text-muted); font-weight:500;">Status</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 ${routes.map((r: ProxyRoute) => `
+                   <tr style="border-bottom:1px solid var(--border-color);">
+                     <td style="padding:10px 16px;"><code>${esc(r.container_name)}</code></td>
+                     <td style="padding:10px 16px;">
+                       <a href="http://${esc(r.domain)}" target="_blank" style="color:var(--primary); text-decoration:none;">
+                         ${esc(r.domain)}
+                       </a>
+                     </td>
+                     <td style="padding:10px 16px;"><span class="badge badge-info">${r.port}</span></td>
+                     <td style="padding:10px 16px;"><span class="container-state-badge running">${esc(r.status)}</span></td>
+                   </tr>`).join("")}
+               </tbody>
+             </table>`
+        }
+      </div>
+    </div>`;
+
+  document.getElementById("btn-ensure-traefik")?.addEventListener("click", async (e) => {
+    const btn = e.target as HTMLButtonElement;
+    btn.textContent = "Starting...";
+    btn.disabled = true;
+    try {
+      await api.ensureTraefik();
+      loadPage();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to start Traefik");
+      btn.disabled = false;
+    }
+  });
+}
+
 // ── Health page ──
 async function loadHealth(el: HTMLElement) {
   el.innerHTML = '<div class="spinner"></div>';
@@ -734,6 +1007,10 @@ async function loadHealth(el: HTMLElement) {
   const memPct =
     m.mem_total_bytes > 0
       ? Math.round((m.mem_used_bytes / m.mem_total_bytes) * 100)
+      : 0;
+  const swapPct =
+    m.swap_total_bytes > 0
+      ? Math.round((m.swap_used_bytes / m.swap_total_bytes) * 100)
       : 0;
   const diskPct =
     m.disk_total_bytes > 0
@@ -757,6 +1034,11 @@ async function loadHealth(el: HTMLElement) {
         <div class="stat-label">RAM Used / ${fmtBytes(m.mem_total_bytes)}</div>
       </div>
       <div class="stat-card">
+        <div class="stat-icon ${swapPct > 85 ? "yellow" : "blue"}">🔄</div>
+        <div class="stat-value">${m.swap_total_bytes > 0 ? fmtBytes(m.swap_used_bytes) : "N/A"}</div>
+        <div class="stat-label">Swap Used${m.swap_total_bytes > 0 ? ` / ${fmtBytes(m.swap_total_bytes)}` : ""}</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-icon ${diskPct > 85 ? "yellow" : "purple"}">💾</div>
         <div class="stat-value">${fmtBytes(m.disk_used_bytes)}</div>
         <div class="stat-label">Disk Used / ${fmtBytes(m.disk_total_bytes)}</div>
@@ -773,6 +1055,7 @@ async function loadHealth(el: HTMLElement) {
       <div class="card-body" style="display:flex; flex-direction:column; gap:20px; max-width:600px;">
         ${meter("CPU", cpuPct, `${cpuPct}%`)}
         ${meter("Memory", memPct, `${fmtBytes(m.mem_used_bytes)} / ${fmtBytes(m.mem_total_bytes)}`)}
+        ${m.swap_total_bytes > 0 ? meter("Swap", swapPct, `${fmtBytes(m.swap_used_bytes)} / ${fmtBytes(m.swap_total_bytes)}`) : meter("Swap", 0, "N/A")}
         ${meter("Disk", diskPct, `${fmtBytes(m.disk_used_bytes)} / ${fmtBytes(m.disk_total_bytes)}`)}
         <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
           Last updated: ${checkedAt} &nbsp;·&nbsp; refreshes every 30 s
@@ -879,6 +1162,17 @@ function showEditRepoModal(repo: any) {
               <input type="checkbox" id="edit-repo-private" ${repo.is_private ? "checked" : ""}>
               <label class="form-label" style="margin:0;">Private Repository</label>
             </div>
+            <div style="border-top:1px solid var(--border-color); padding-top:10px; margin-top:4px;">
+              <div style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">Optional — reverse proxy settings</div>
+              <div class="form-group">
+                <label class="form-label">Domain</label>
+                <input class="form-input" id="edit-repo-domain" placeholder="app.example.com" value="${esc(repo.domain || "")}">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Container Port</label>
+                <input class="form-input" id="edit-repo-proxy-port" type="number" min="1" max="65535" value="${repo.proxy_port ?? 3000}" style="max-width:120px;">
+              </div>
+            </div>
             <div id="edit-repo-error" class="form-error" style="display:none; color:red;"></div>
             <button class="btn btn-primary" type="submit">Save Changes</button>
           </form>
@@ -915,6 +1209,9 @@ function showEditRepoModal(repo: any) {
         document.getElementById("edit-repo-private") as HTMLInputElement
       ).checked;
 
+      const domain = (document.getElementById("edit-repo-domain") as HTMLInputElement).value.trim();
+      const proxyPortRaw = (document.getElementById("edit-repo-proxy-port") as HTMLInputElement).value;
+      const proxyPort = proxyPortRaw ? parseInt(proxyPortRaw) : null;
       const errorEl = document.getElementById("edit-repo-error")!;
       try {
         await api.updateRepository(repo.id, {
@@ -924,6 +1221,8 @@ function showEditRepoModal(repo: any) {
           default_branch: branch,
           ssh_password: sshPassword || null,
           is_private: isPrivate,
+          domain: domain || null,
+          proxy_port: proxyPort && !isNaN(proxyPort) ? proxyPort : null,
         });
         root.innerHTML = "";
         loadPage();
@@ -956,6 +1255,7 @@ function parseHash() {
       "containers",
       "repositories",
       "deployments",
+      "proxy",
       "health",
       "settings",
     ].includes(hash)

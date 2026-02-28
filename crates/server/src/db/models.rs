@@ -102,6 +102,32 @@ pub struct PortMapping {
     pub port_type: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EnvVar {
+    pub id: i64,
+    pub repo_id: i64,
+    pub key: String,
+    pub value: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpsertEnvVar {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateEnvVarValue {
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImportFromCompose {
+    pub compose_file: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub username: String,

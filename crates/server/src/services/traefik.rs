@@ -1,8 +1,10 @@
 use anyhow::Result;
 use bollard::container::{Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions};
+use bollard::image::CreateImageOptions;
 use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
 use bollard::network::{ConnectNetworkOptions, CreateNetworkOptions};
 use bollard::Docker;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -76,6 +78,22 @@ impl TraefikService {
                 .start_container(id, None::<StartContainerOptions<String>>)
                 .await?;
             return Ok(());
+        }
+
+        // Pull the image first (no-op if already present; streams progress until done)
+        tracing::info!("Pulling image '{}'", TRAEFIK_IMAGE);
+        let mut pull_stream = self.docker.create_image(
+            Some(CreateImageOptions {
+                from_image: TRAEFIK_IMAGE,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(info) = pull_stream.try_next().await? {
+            if let Some(status) = info.status {
+                tracing::debug!("pull: {}", status);
+            }
         }
 
         // Create and start a fresh Traefik container

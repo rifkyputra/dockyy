@@ -47,3 +47,6 @@ mime_guess = "2"
 
 # System metrics
 sysinfo = "0.33"
+
+# YAML parsing (for docker-compose env var import)
+serde_yaml = "0.9"

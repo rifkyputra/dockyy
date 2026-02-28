@@ -11,6 +11,8 @@ pub struct SystemMetrics {
     pub cpu_usage_pct: f32,
     pub mem_used_bytes: u64,
     pub mem_total_bytes: u64,
+    pub swap_used_bytes: u64,
+    pub swap_total_bytes: u64,
     /// Root filesystem (or largest disk) used bytes
     pub disk_used_bytes: u64,
     pub disk_total_bytes: u64,
@@ -47,6 +49,8 @@ pub async fn run_monitor(state: Arc<crate::AppState>) {
             cpu = updated.cpu_usage_pct,
             mem_used = updated.mem_used_bytes,
             mem_total = updated.mem_total_bytes,
+            swap_used = updated.swap_used_bytes,
+            swap_total = updated.swap_total_bytes,
             disk_used = updated.disk_used_bytes,
             disk_total = updated.disk_total_bytes,
             docker_ok = updated.docker_ok,
@@ -73,6 +77,8 @@ fn collect_system_metrics() -> SystemMetrics {
     let cpu_usage_pct = sys.global_cpu_usage();
     let mem_used_bytes = sys.used_memory();
     let mem_total_bytes = sys.total_memory();
+    let swap_used_bytes = sys.used_swap();
+    let swap_total_bytes = sys.total_swap();
 
     // Prefer the root filesystem; fall back to summing all disks.
     let disks = Disks::new_with_refreshed_list();
@@ -97,6 +103,8 @@ fn collect_system_metrics() -> SystemMetrics {
         cpu_usage_pct,
         mem_used_bytes,
         mem_total_bytes,
+        swap_used_bytes,
+        swap_total_bytes,
         disk_used_bytes,
         disk_total_bytes,
         // filled in by the async caller

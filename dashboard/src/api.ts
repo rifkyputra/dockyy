@@ -110,6 +110,32 @@ export const api = {
       method: "POST",
     }),
 
+  // Env vars
+  listEnvVars: (id: number) =>
+    request<EnvVar[]>(`/repositories/${id}/env-vars`),
+  upsertEnvVar: (id: number, key: string, value: string) =>
+    request<{ id: number; message: string }>(`/repositories/${id}/env-vars`, {
+      method: "POST",
+      body: JSON.stringify({ key, value }),
+    }),
+  updateEnvVar: (repoId: number, varId: number, value: string) =>
+    request<{ message: string }>(`/repositories/${repoId}/env-vars/${varId}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+  deleteEnvVar: (repoId: number, varId: number) =>
+    request<{ message: string }>(`/repositories/${repoId}/env-vars/${varId}`, {
+      method: "DELETE",
+    }),
+  importEnvVarsFromCompose: (id: number, compose_file: string) =>
+    request<{ message: string; keys: string[] }>(
+      `/repositories/${id}/env-vars/import-from-compose`,
+      {
+        method: "POST",
+        body: JSON.stringify({ compose_file }),
+      },
+    ),
+
   // Deployments
   listDeployments: () => request<Deployment[]>("/deployments"),
   listDeploymentsByRepo: (repoId: number) =>
@@ -119,6 +145,15 @@ export const api = {
       `/deployments/${id}/redeploy`,
       { method: "POST" },
     ),
+
+  // Proxy
+  proxyStatus: () =>
+    request<{ traefik_running: boolean; network: string; container: string }>(
+      "/proxy/status",
+    ),
+  proxyRoutes: () => request<ProxyRoute[]>("/proxy/routes"),
+  ensureTraefik: () =>
+    request<{ message: string }>("/proxy/ensure", { method: "POST" }),
 };
 
 // Types
@@ -136,6 +171,23 @@ export interface Container {
   created: number;
 }
 
+export interface ProxyRoute {
+  container_id: string;
+  container_name: string;
+  domain: string;
+  port: number;
+  status: string;
+}
+
+export interface EnvVar {
+  id: number;
+  repo_id: number;
+  key: string;
+  value: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Repository {
   id: number;
   name: string;
@@ -147,6 +199,8 @@ export interface Repository {
   ssh_password: string | null;
   is_private: boolean;
   default_branch: string;
+  domain: string | null;
+  proxy_port: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -155,6 +209,8 @@ export interface ServerMetrics {
   cpu_usage_pct: number;
   mem_used_bytes: number;
   mem_total_bytes: number;
+  swap_used_bytes: number;
+  swap_total_bytes: number;
   disk_used_bytes: number;
   disk_total_bytes: number;
   docker_ok: boolean;
