@@ -81,7 +81,7 @@ function renderLayout(): string {
         <div class="sidebar-header">
           <div class="sidebar-logo">D</div>
           <span class="sidebar-title">Dockyy</span>
-          <span class="sidebar-version">v0.1</span>
+          <span class="sidebar-version">v0.2</span>
         </div>
         <nav class="sidebar-nav">
           <div class="nav-section">Management</div>
