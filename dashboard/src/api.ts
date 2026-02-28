@@ -1,0 +1,168 @@
+const API_BASE = "/api";
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem("dockyy_token");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((options.headers as Record<string, string>) || {}),
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+
+  if (res.status === 401) {
+    localStorage.removeItem("dockyy_token");
+    window.location.reload();
+    throw new Error("Unauthorized");
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export const api = {
+  // Auth
+  login: (username: string, password: string) =>
+    request<{ token: string; username: string }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+
+  verify: (token: string) =>
+    request<{ valid: boolean; username: string }>("/auth/verify", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+
+  // Health
+  health: () =>
+    request<{ status: string; docker: string; version: string }>("/health"),
+
+  metrics: () => request<ServerMetrics>("/metrics"),
+
+  // Containers
+  listContainers: (all = true) =>
+    request<Container[]>(`/containers?all=${all}`),
+
+  startContainer: (id: string) =>
+    request<{ status: string }>(`/containers/${id}/start`, { method: "POST" }),
+
+  stopContainer: (id: string) =>
+    request<{ status: string }>(`/containers/${id}/stop`, { method: "POST" }),
+
+  restartContainer: (id: string) =>
+    request<{ status: string }>(`/containers/${id}/restart`, {
+      method: "POST",
+    }),
+
+  removeContainer: (id: string) =>
+    request<{ status: string }>(`/containers/${id}`, { method: "DELETE" }),
+
+  containerLogs: (id: string, tail = 100) =>
+    request<{ logs: string }>(`/containers/${id}/logs?tail=${tail}`),
+
+  // Repositories
+  listRepositories: () => request<Repository[]>("/repositories"),
+  getRepository: (id: number) => request<Repository>(`/repositories/${id}`),
+  createRepository: (data: Partial<Repository>) =>
+    request<{ id: number }>("/repositories", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateRepository: (id: number, data: Partial<Repository>) =>
+    request<{ message: string }>(`/repositories/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteRepository: (id: number) =>
+    request<{ message: string }>(`/repositories/${id}`, { method: "DELETE" }),
+
+  getFilesystemStatus: (id: number) =>
+    request<{
+      has_git_repo: boolean;
+      has_docker_compose: boolean;
+      repo_path: string;
+    }>(`/repositories/${id}/filesystem-status`),
+  getReadme: (id: number) =>
+    request<{ content: string }>(`/repositories/${id}/readme`),
+  getComposeFiles: (id: number) =>
+    request<{ path: string; content: string }[]>(
+      `/repositories/${id}/compose-files`,
+    ),
+  cloneRepository: (id: number) =>
+    request<{ message: string }>(`/repositories/${id}/clone`, {
+      method: "POST",
+    }),
+  dockerComposeUp: (id: number) =>
+    request<{ message: string }>(`/repositories/${id}/docker-compose-up`, {
+      method: "POST",
+    }),
+
+  // Deployments
+  listDeployments: () => request<Deployment[]>("/deployments"),
+  listDeploymentsByRepo: (repoId: number) =>
+    request<Deployment[]>(`/deployments/repo/${repoId}`),
+  redeploy: (id: number) =>
+    request<{ message: string; job_id: number }>(
+      `/deployments/${id}/redeploy`,
+      { method: "POST" },
+    ),
+};
+
+// Types
+export interface Container {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  state: string;
+  ports: {
+    private_port: number;
+    public_port: number | null;
+    port_type: string;
+  }[];
+  created: number;
+}
+
+export interface Repository {
+  id: number;
+  name: string;
+  owner: string;
+  url: string;
+  description: string | null;
+  webhook_url: string | null;
+  filesystem_path: string | null;
+  ssh_password: string | null;
+  is_private: boolean;
+  default_branch: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ServerMetrics {
+  cpu_usage_pct: number;
+  mem_used_bytes: number;
+  mem_total_bytes: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+  docker_ok: boolean;
+  checked_at: string;
+}
+
+export interface Deployment {
+  id: number;
+  repo_id: number;
+  status: string;
+  commit_sha: string | null;
+  image_name: string | null;
+  container_id: string | null;
+  domain: string | null;
+  port: number | null;
+  build_log: string | null;
+  created_at: string;
+  updated_at: string;
+}

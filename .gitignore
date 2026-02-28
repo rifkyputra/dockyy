@@ -52,4 +52,8 @@ htmlcov/
 # UV
 .uv/
 
+# Rust
+target/
+data/
+
 *.log

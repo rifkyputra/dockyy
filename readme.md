@@ -1,168 +1,117 @@
-# Dockyy - Docker Dashboard
+# Dockyy
 
-A modern Docker management dashboard with Git repository integration, Docker Compose project management, and Cloudflare Tunnel support.
+A blazingly fast, near-zero RAM Docker management dashboard and PaaS.
+
+**Single binary. Embedded database. ~10MB RAM at idle.**
 
 ## Architecture
 
-- **Frontend**: React (client-side only, no SSR) with TypeScript, Bun, TailwindCSS, DaisyUI, and TanStack Query
-- **Backend**: Flask REST API with UV as package manager, SQLAlchemy (Turso/LibSQL), and Alembic for migrations
+- **Server**: Rust + Axum — single async binary, serves API + embedded dashboard
+- **Database**: Embedded SQLite (WAL mode) — no external database needed
+- **Dashboard**: Vanilla TypeScript + Vite — compiled to static assets embedded in binary
+- **Docker**: bollard SDK — async container management via Unix socket
 
-## Prerequisites
+## Quick Start
 
-- [Bun](https://bun.sh/) >= 1.0
-- [UV](https://github.com/astral-sh/uv) >= 0.1.0
-- Python >= 3.11
-- Docker Desktop
-
-## Getting Started
-
-### Backend Setup
-
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
-
-2. Install dependencies using UV:
-   ```bash
-   uv sync
-   ```
-
-3. Copy the environment file and configure:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your Turso database credentials
-   ```
-
-4. Run database migrations:
-   ```bash
-   python migrate.py upgrade
-   ```
-
-5. Run the Flask server:
-   ```bash
-   uv run python -m app
-   ```
-
-The backend will be available at `http://localhost:8012`
-
-### Frontend Setup
-
-1. Navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-
-2. Install dependencies using Bun:
-   ```bash
-   bun install
-   ```
-
-3. Start the development server:
-   ```bash
-   bun run dev
-   ```
-
-The frontend will be available at `http://localhost:3000`
-
-## Features
-
-- 🐳 **Docker Container Management**: View, start, stop, restart, and remove containers
-- 📦 **Docker Compose Projects**: Manage multi-container applications with compose up/down/restart
-- 📂 **Git Repository Management**: Clone, pull, push, stash, and manage Git repositories with SSH support
-- 🔄 **Git Operations**: View file changes, diffs, commit logs, and repository status
-- 🌐 **Cloudflare Tunnel Integration**: Manage cloudflared tunnels and configurations
-- 🔐 **Authentication**: Simple admin list JWT-based authentication system
-- 📊 **Real-time Status**: Live container and project status monitoring
-- 📝 **README Viewer**: View repository README files directly in the dashboard
-- 🎨 **Modern UI**: Responsive interface built with DaisyUI and TailwindCSS
-- ⚡ **Fast Development**: Vite for frontend, Flask for backend
-
-## API Endpoints
-
-### Authentication
-- `POST /api/auth/login` - Login and receive JWT token
-- `POST /api/auth/verify` - Verify JWT token
-
-### Containers
-- `GET /api/containers` - List all containers with status
-- `POST /api/containers/<container_id>/start` - Start a container
-- `POST /api/containers/<container_id>/stop` - Stop a container
-- `POST /api/containers/<container_id>/restart` - Restart a container
-- `DELETE /api/containers/<container_id>` - Remove a container
-- `GET /api/containers/<container_id>/logs` - Get container logs
-
-### Docker Compose Projects
-- `GET /api/projects` - List all Docker Compose projects
-- `POST /api/projects/up` - Start a compose project
-- `POST /api/projects/down` - Stop and remove a compose project
-- `POST /api/projects/restart` - Restart a compose project
-
-### Repositories
-- `GET /api/repositories` - List all repositories
-- `GET /api/repositories/<id>` - Get repository details
-- `POST /api/repositories` - Create/register new repository
-- `PUT /api/repositories/<id>` - Update repository
-- `DELETE /api/repositories/<id>` - Delete repository
-- `GET /api/repositories/<id>/readme` - Get repository README content
-- `GET /api/repositories/<id>/status` - Get Git status
-- `GET /api/repositories/<id>/log` - Get commit log
-- `GET /api/repositories/<id>/diff` - Get file changes
-- `POST /api/repositories/<id>/clone` - Clone repository
-- `POST /api/repositories/<id>/pull` - Pull latest changes
-- `POST /api/repositories/<id>/push` - Push changes to remote
-- `POST /api/repositories/<id>/compose` - Check for docker-compose files
-
-### Cloudflare Tunnels
-- `GET /api/tunnels/cloudflared/status` - Check cloudflared installation status
-- `GET /api/tunnels/cloudflared/config` - Get tunnel configuration
-- `POST /api/tunnels/cloudflared/config` - Update tunnel configuration
-- `GET /api/tunnels/cloudflared/list` - List all tunnels
-- `POST /api/tunnels/cloudflared/start` - Start a tunnel
-- `POST /api/tunnels/cloudflared/stop` - Stop a tunnel
-
-## Database Migrations
-
-This project uses Alembic for database schema management. See [backend/migrations/README.md](backend/migrations/README.md) for detailed documentation.
-
-### Common Migration Commands
+### Option 1: Binary
 
 ```bash
-# Apply all pending migrations
-python migrate.py upgrade
+# Build everything
+make build
 
-# Create new migration after model changes
-python migrate.py autogenerate -m "Description of changes"
-
-# Check current migration version
-python migrate.py current
-
-# View migration history
-python migrate.py history
+# Run
+./target/release/dockyy
 ```
 
-## Development
+Open `http://localhost:3000` — login with `admin` / `admin`.
 
-### Tech Stack
+### Option 2: Docker
 
-- **Frontend**: React 18, TypeScript, Vite, TailwindCSS 4, DaisyUI, TanStack Query
-- **Backend**: Flask 3, SQLAlchemy with LibSQL (Turso), Alembic, Docker Python SDK, PyYAML
-- **Authentication**: JWT (PyJWT)
-- **Version Control**: Git operations via subprocess
-- **Container Management**: Docker Python SDK
+```bash
+# Build & run
+make docker
+make docker-run
+```
 
 ### Environment Variables
 
-Backend (`.env` in backend directory):
-```env
-DATABASE_URL=libsql://your-turso-url
-DATABASE_AUTH_TOKEN=your-turso-token
-SECRET_KEY=your-jwt-secret-key
-DEFAULT_ADMIN_USERNAME=admin
-DEFAULT_ADMIN_PASSWORD=your-secure-password
+| Variable          | Default   | Description               |
+| ----------------- | --------- | ------------------------- |
+| `HOST`            | `0.0.0.0` | Bind address              |
+| `PORT`            | `3000`    | Listen port               |
+| `ADMIN_USERNAME`  | `admin`   | Login username            |
+| `ADMIN_PASSWORD`  | `admin`   | Login password            |
+| `JWT_SECRET`      | (random)  | JWT signing secret        |
+| `DOCKYY_DATA_DIR` | `./data`  | SQLite database directory |
+
+## Features
+
+- 🐳 **Container Management** — start, stop, restart, remove, view logs
+- 📂 **Repository Tracking** — register Git repos for deployment
+- 🚀 **Push-to-Deploy** — GitHub webhook → automatic build & deploy (via SQLite job queue)
+- 🔐 **JWT Authentication** — simple admin auth with bcrypt
+- 📊 **Real-time Dashboard** — modern dark UI with live stats
+- ⚡ **Near-Zero RAM** — ~10-20MB idle, no Redis/Postgres required
+
+## API Endpoints
+
+| Method   | Path                            | Description          |
+| -------- | ------------------------------- | -------------------- |
+| `POST`   | `/api/auth/login`               | Login                |
+| `POST`   | `/api/auth/verify`              | Verify JWT           |
+| `GET`    | `/api/health`                   | Server health check  |
+| `GET`    | `/api/containers`               | List containers      |
+| `POST`   | `/api/containers/:id/start`     | Start container      |
+| `POST`   | `/api/containers/:id/stop`      | Stop container       |
+| `POST`   | `/api/containers/:id/restart`   | Restart container    |
+| `DELETE` | `/api/containers/:id`           | Remove container     |
+| `GET`    | `/api/containers/:id/logs`      | Container logs       |
+| `GET`    | `/api/repositories`             | List repositories    |
+| `POST`   | `/api/repositories`             | Create repository    |
+| `GET`    | `/api/repositories/:id`         | Get repository       |
+| `PUT`    | `/api/repositories/:id`         | Update repository    |
+| `DELETE` | `/api/repositories/:id`         | Delete repository    |
+| `GET`    | `/api/deployments`              | List deployments     |
+| `POST`   | `/api/deployments/:id/redeploy` | Trigger redeployment |
+| `POST`   | `/api/webhooks/github`          | GitHub push webhook  |
+
+## Development
+
+```bash
+# Dev mode (Vite HMR + Rust server with debug logging)
+make dev
+
+# Just the dashboard
+cd dashboard && npm run dev
+
+# Just the server
+RUST_LOG=dockyy=debug cargo run -p dockyy
+```
+
+## Project Structure
+
+```
+dockyy/
+├── Cargo.toml              # Workspace root
+├── Makefile                 # Build commands
+├── Dockerfile              # Multi-stage production build
+├── crates/server/
+│   ├── Cargo.toml          # Server dependencies
+│   └── src/
+│       ├── main.rs         # Entry point, Axum server setup
+│       ├── auth/           # JWT auth + middleware
+│       ├── db/             # SQLite database + models
+│       ├── routes/         # API route handlers
+│       └── services/       # Docker service layer
+└── dashboard/
+    ├── package.json        # Vite + TypeScript
+    ├── src/
+    │   ├── main.ts         # SPA entry point
+    │   ├── api.ts          # Typed API client
+    │   └── style.css       # Design system
+    └── dist/               # Built static assets (embedded)
 ```
 
 ## License
 
 MIT
-
