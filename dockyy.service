@@ -5,8 +5,8 @@ Wants=podman.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/rifqempul/dockyy
-ExecStart=/home/rifqempul/dockyy/binary/x86_64/dockyy
+EnvironmentFile=/etc/dockyy/.env
+ExecStart=/usr/local/bin/dockyy
 Restart=on-failure
 RestartSec=5
 

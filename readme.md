@@ -52,25 +52,18 @@ DOCKYY_DATA_DIR=/home/user/dockyy-data
 
 ## Deployment
 
-### Run as systemd Service (Recommended)
+### First-Time Setup
 
 ```bash
-sudo cp dockyy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable dockyy
-sudo systemctl start dockyy
+# On server — clone the repo, then run the deploy script
+git clone <your-repo-url> dockyy && cd dockyy
+cp .env.example .env  # edit with your credentials
+./deploy.sh
 ```
 
-Manage the service:
+The deploy script installs the binary to `/usr/local/bin/dockyy`, sets up the systemd service, and copies `.env` to `/etc/dockyy/.env` (only on first run — won't overwrite existing config).
 
-```bash
-sudo systemctl status dockyy      # Check status
-sudo systemctl restart dockyy     # Restart after deploy
-sudo systemctl stop dockyy        # Stop
-sudo journalctl -u dockyy -f      # Tail logs
-```
-
-### Deploy Workflow
+### Deploy Updates
 
 ```bash
 # On dev machine
@@ -80,9 +73,19 @@ git commit -m "deploy: update binary"
 git push
 
 # On server
-git pull
-sudo systemctl restart dockyy
+./deploy.sh
 ```
+
+### Manage the Service
+
+```bash
+sudo systemctl status dockyy      # Check status
+sudo systemctl restart dockyy     # Restart after deploy
+sudo systemctl stop dockyy        # Stop
+sudo journalctl -u dockyy -f      # Tail logs
+```
+
+Configuration lives at `/etc/dockyy/.env` — edit it directly on the server and restart.
 
 ## Features
 
