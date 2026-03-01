@@ -89,7 +89,7 @@ sudo systemctl restart dockyy
 - 🐳 **Container Management** — start, stop, restart, remove, view logs
 - 📂 **Repository Tracking** — register Git repos for deployment
 - 🚀 **Push-to-Deploy** — GitHub webhook → automatic build & deploy (via SQLite job queue)
-- 🔐 **JWT Authentication** — simple admin auth with bcrypt
+- 🔐 **JWT Authentication** — simple admin auth with argon2
 - 📊 **Real-time Dashboard** — modern dark UI with live stats
 - ⚡ **Near-Zero RAM** — ~10-20MB idle, no Redis/Postgres required
 

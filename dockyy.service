@@ -1,7 +1,7 @@
 [Unit]
 Description=Dockyy Container Manager
-After=network.target docker.service
-Requires=docker.service
+After=network.target podman.service
+Wants=podman.service
 
 [Service]
 Type=simple
