@@ -1,7 +1,25 @@
 .PHONY: setup dev build dashboard server clean docker
 
-# Install all required tooling (Rust, cargo-watch, Node.js via fnm)
+# Install all required tooling (C toolchain, Rust, cargo-watch, Node.js via fnm)
 setup:
+	@echo "==> Checking C compiler (cc)..."
+	@command -v cc >/dev/null 2>&1 || { \
+		echo "C compiler not found. Installing build tools..."; \
+		if [ "$$(uname)" = "Darwin" ]; then \
+			xcode-select --install; \
+			echo "Please follow the Xcode CLI tools prompt, then re-run 'make setup'."; \
+			exit 1; \
+		elif command -v dnf >/dev/null 2>&1; then \
+			sudo dnf install -y gcc make pkg-config openssl-devel; \
+		elif command -v apt-get >/dev/null 2>&1; then \
+			sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev; \
+		elif command -v pacman >/dev/null 2>&1; then \
+			sudo pacman -S --noconfirm base-devel openssl; \
+		else \
+			echo "Unsupported OS. Please install gcc/cc manually."; \
+			exit 1; \
+		fi; \
+	}
 	@echo "==> Checking Rust toolchain..."
 	@command -v rustup >/dev/null 2>&1 || { \
 		echo "Installing Rust via rustup..."; \
