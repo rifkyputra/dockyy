@@ -1,11 +1,14 @@
 .PHONY: dev build dashboard server clean docker
 
-# Development: run Rust server + Vite dev server
+run:
+	make build; pkill dockyy; sleep 2; ./target/release/dockyy
+
+# Development: run Rust server (auto-reload) + Vite dev server (HMR)
 dev:
 	@echo "Starting dashboard dev server..."
 	cd dashboard && npm run dev &
-	@echo "Starting Rust server..."
-	cd crates/server && RUST_LOG=dockyy=debug cargo run
+	@echo "Starting Rust server with live reload..."
+	RUST_LOG=dockyy=debug cargo watch -x run -w crates/server/src -i dashboard
 
 # Build everything
 build: dashboard server

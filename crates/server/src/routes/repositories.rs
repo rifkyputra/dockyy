@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::db::models::{
-    CreateRepository, EnvVar, ImportFromCompose, Repository, UpdateEnvVarValue, UpdateRepository,
-    UpsertEnvVar,
+    CreateRepository, DockerComposeUpRequest, Repository, SaveComposeOverrideRequest,
+    UpdateRepository,
 };
 use crate::AppState;
 
@@ -29,18 +29,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/{id}/pull", post(pull_repository))
         .route("/repositories/{id}/fetch", post(fetch_repository))
         .route("/repositories/{id}/docker-compose-up", post(docker_compose_up))
-        // Env vars CRUD
         .route(
-            "/repositories/{id}/env-vars",
-            get(list_env_vars).post(upsert_env_var),
-        )
-        .route(
-            "/repositories/{id}/env-vars/{var_id}",
-            put(update_env_var).delete(delete_env_var),
-        )
-        .route(
-            "/repositories/{id}/env-vars/import-from-compose",
-            post(import_env_vars_from_compose),
+            "/repositories/{id}/compose-files/{filename}",
+            put(save_compose_override).delete(reset_compose_override),
         )
 }
 
@@ -340,15 +331,20 @@ async fn get_readme(
     })))
 }
 
+fn override_dir(data_dir: &str, repo_id: i64) -> String {
+    format!("{}/compose-overrides/{}", data_dir, repo_id)
+}
+
 async fn get_compose_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
     let path = std::path::Path::new(&repo_dir);
-    
+    let ovr_dir = override_dir(&state.config.data_dir, id);
+
     let mut files = Vec::new();
-    
+
     if let Ok(entries) = std::fs::read_dir(path) {
         let mut paths: Vec<_> = entries
             .filter_map(|e| e.ok())
@@ -363,21 +359,24 @@ async fn get_compose_files(
                 }
             })
             .collect();
-            
+
         paths.sort();
-        
+
         for cp in paths {
             if let Ok(c) = std::fs::read_to_string(&cp) {
                 if let Some(name) = cp.file_name().and_then(|n| n.to_str()) {
+                    let override_content =
+                        std::fs::read_to_string(format!("{}/{}", ovr_dir, name)).ok();
                     files.push(json!({
                         "path": name,
-                        "content": c
+                        "content": c,
+                        "override_content": override_content
                     }));
                 }
             }
         }
     }
-    
+
     Ok(Json(json!(files)))
 }
 
@@ -436,49 +435,53 @@ async fn clone_repository(
 async fn docker_compose_up(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
+    Json(body): Json<DockerComposeUpRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let repo = get_repository(State(state.clone()), Path(id)).await?.0;
     let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
-
-    // Write stored env vars to .env file so docker compose picks them up
-    let env_vars = state
-        .db
-        .with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT key, value FROM repo_env_vars WHERE repo_id = ?1 ORDER BY key",
-            )?;
-            let rows = stmt
-                .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-
-    if !env_vars.is_empty() {
-        let env_content = env_vars
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(format!("{repo_dir}/.env"), env_content).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to write .env: {e}")})),
-            )
-        })?;
-    }
+    let ovr_dir = override_dir(&state.config.data_dir, id);
 
     let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
 
-    let output = tokio::process::Command::new("docker")
-        .arg("compose")
-        .arg("-p")
-        .arg(&container_name)
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.arg("compose").arg("-p").arg(&container_name);
+
+    // Track temp file to clean up after compose runs
+    let mut temp_override_path: Option<String> = None;
+
+    if let Some(file) = &body.compose_file {
+        if file.contains('/') || file.contains('\\') {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid compose file name"})),
+            ));
+        }
+        // Check if an override exists for this file
+        let override_path = format!("{}/{}", ovr_dir, file);
+        if std::path::Path::new(&override_path).exists() {
+            // Write override content to a temp file in the repo dir so relative paths work
+            let tmp_name = format!(".dockyy-override-{}", file);
+            let tmp_path = format!("{}/{}", repo_dir, tmp_name);
+            let content = std::fs::read_to_string(&override_path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+            std::fs::write(&tmp_path, &content).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+            cmd.arg("-f").arg(&tmp_name);
+            temp_override_path = Some(tmp_path);
+        } else {
+            cmd.arg("-f").arg(file);
+        }
+    }
+
+    let output = cmd
         .arg("up")
         .arg("-d")
         .arg("--build")
@@ -492,6 +495,11 @@ async fn docker_compose_up(
             )
         })?;
 
+    // Clean up temp override file
+    if let Some(tmp) = temp_override_path {
+        let _ = std::fs::remove_file(tmp);
+    }
+
     if !output.status.success() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -502,223 +510,53 @@ async fn docker_compose_up(
     Ok(Json(json!({"message": "Deployment started with docker-compose"})))
 }
 
-// ── Env vars ──────────────────────────────────────────────────────────────────
 
-async fn list_env_vars(
+async fn save_compose_override(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> Result<Json<Vec<EnvVar>>, (StatusCode, Json<Value>)> {
-    state
-        .db
-        .with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, repo_id, key, value, created_at, updated_at
-                 FROM repo_env_vars WHERE repo_id = ?1 ORDER BY key",
-            )?;
-            let rows = stmt
-                .query_map([id], |row| {
-                    Ok(EnvVar {
-                        id: row.get(0)?,
-                        repo_id: row.get(1)?,
-                        key: row.get(2)?,
-                        value: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })
-}
-
-async fn upsert_env_var(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-    Json(body): Json<UpsertEnvVar>,
-) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    state
-        .db
-        .with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO repo_env_vars (repo_id, key, value)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(repo_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-                rusqlite::params![id, body.key, body.value],
-            )?;
-            let row_id = conn.last_insert_rowid();
-            Ok(row_id)
-        })
-        .map(|row_id| {
-            (
-                StatusCode::CREATED,
-                Json(json!({"id": row_id, "message": "Env var saved"})),
-            )
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })
-}
-
-async fn update_env_var(
-    State(state): State<Arc<AppState>>,
-    Path((repo_id, var_id)): Path<(i64, i64)>,
-    Json(body): Json<UpdateEnvVarValue>,
+    Path((id, filename)): Path<(i64, String)>,
+    Json(body): Json<SaveComposeOverrideRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    state
-        .db
-        .with_conn(|conn| {
-            let n = conn.execute(
-                "UPDATE repo_env_vars SET value = ?1, updated_at = datetime('now')
-                 WHERE id = ?2 AND repo_id = ?3",
-                rusqlite::params![body.value, var_id, repo_id],
-            )?;
-            if n == 0 {
-                anyhow::bail!("Env var not found");
-            }
-            Ok(())
-        })
-        .map(|_| Json(json!({"message": "Env var updated"})))
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": e.to_string()})),
-            )
-        })
-}
-
-async fn delete_env_var(
-    State(state): State<Arc<AppState>>,
-    Path((repo_id, var_id)): Path<(i64, i64)>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    state
-        .db
-        .with_conn(|conn| {
-            let n = conn.execute(
-                "DELETE FROM repo_env_vars WHERE id = ?1 AND repo_id = ?2",
-                rusqlite::params![var_id, repo_id],
-            )?;
-            if n == 0 {
-                anyhow::bail!("Env var not found");
-            }
-            Ok(())
-        })
-        .map(|_| Json(json!({"message": "Env var deleted"})))
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": e.to_string()})),
-            )
-        })
-}
-
-async fn import_env_vars_from_compose(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-    Json(body): Json<ImportFromCompose>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
-
-    // Validate compose file name (must not contain path separators)
-    if body.compose_file.contains('/') || body.compose_file.contains('\\') {
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Invalid compose file name"})),
+            Json(json!({"error": "Invalid filename"})),
         ));
     }
 
-    let compose_path = std::path::Path::new(&repo_dir).join(&body.compose_file);
-    let content = std::fs::read_to_string(&compose_path).map_err(|e| {
+    let ovr_dir = override_dir(&state.config.data_dir, id);
+    std::fs::create_dir_all(&ovr_dir).map_err(|e| {
         (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("Cannot read compose file: {e}")})),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
         )
     })?;
 
-    let keys = extract_env_keys_from_compose(&content);
+    let path = format!("{}/{}", ovr_dir, filename);
+    std::fs::write(&path, &body.content).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
-    let inserted = state
-        .db
-        .with_conn(|conn| {
-            let mut count = 0usize;
-            for key in &keys {
-                // Only insert if the key does not already exist (preserve existing values)
-                let n = conn.execute(
-                    "INSERT INTO repo_env_vars (repo_id, key, value)
-                     VALUES (?1, ?2, '')
-                     ON CONFLICT(repo_id, key) DO NOTHING",
-                    rusqlite::params![id, key],
-                )?;
-                count += n;
-            }
-            Ok(count)
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-
-    Ok(Json(
-        json!({"message": format!("Imported {} new env vars ({} total keys found)", inserted, keys.len()), "keys": keys}),
-    ))
+    Ok(Json(json!({"message": "Override saved"})))
 }
 
-/// Parse a docker-compose YAML and collect all environment variable keys across all services.
-fn extract_env_keys_from_compose(content: &str) -> Vec<String> {
-    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
-        return vec![];
-    };
-
-    let mut keys = std::collections::BTreeSet::new();
-
-    let Some(services) = doc.get("services").and_then(|s| s.as_mapping()) else {
-        return vec![];
-    };
-
-    for (_svc_name, svc_val) in services {
-        let Some(env) = svc_val.get("environment") else {
-            continue;
-        };
-
-        match env {
-            // environment as a sequence: ["KEY=VALUE", "KEY_ONLY"]
-            serde_yaml::Value::Sequence(seq) => {
-                for item in seq {
-                    if let Some(s) = item.as_str() {
-                        let key = s.splitn(2, '=').next().unwrap_or(s).trim().to_string();
-                        if !key.is_empty() {
-                            keys.insert(key);
-                        }
-                    }
-                }
-            }
-            // environment as a mapping: KEY: VALUE
-            serde_yaml::Value::Mapping(map) => {
-                for (k, _v) in map {
-                    if let Some(key) = k.as_str() {
-                        let key = key.trim().to_string();
-                        if !key.is_empty() {
-                            keys.insert(key);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
+async fn reset_compose_override(
+    State(state): State<Arc<AppState>>,
+    Path((id, filename)): Path<(i64, String)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Invalid filename"})),
+        ));
     }
 
-    keys.into_iter().collect()
+    let path = format!("{}/{}", override_dir(&state.config.data_dir, id), filename);
+    let _ = std::fs::remove_file(&path);
+
+    Ok(Json(json!({"message": "Override reset"})))
 }
 
 async fn pull_repository(

@@ -90,9 +90,18 @@ export const api = {
   getReadme: (id: number) =>
     request<{ content: string }>(`/repositories/${id}/readme`),
   getComposeFiles: (id: number) =>
-    request<{ path: string; content: string }[]>(
+    request<{ path: string; content: string; override_content: string | null }[]>(
       `/repositories/${id}/compose-files`,
     ),
+  saveComposeOverride: (id: number, filename: string, content: string) =>
+    request<{ message: string }>(`/repositories/${id}/compose-files/${encodeURIComponent(filename)}`, {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }),
+  resetComposeOverride: (id: number, filename: string) =>
+    request<{ message: string }>(`/repositories/${id}/compose-files/${encodeURIComponent(filename)}`, {
+      method: "DELETE",
+    }),
   cloneRepository: (id: number) =>
     request<{ message: string }>(`/repositories/${id}/clone`, {
       method: "POST",
@@ -105,36 +114,11 @@ export const api = {
     request<{ message: string }>(`/repositories/${id}/fetch`, {
       method: "POST",
     }),
-  dockerComposeUp: (id: number) =>
+  dockerComposeUp: (id: number, composeFile?: string) =>
     request<{ message: string }>(`/repositories/${id}/docker-compose-up`, {
       method: "POST",
+      body: JSON.stringify({ compose_file: composeFile || null }),
     }),
-
-  // Env vars
-  listEnvVars: (id: number) =>
-    request<EnvVar[]>(`/repositories/${id}/env-vars`),
-  upsertEnvVar: (id: number, key: string, value: string) =>
-    request<{ id: number; message: string }>(`/repositories/${id}/env-vars`, {
-      method: "POST",
-      body: JSON.stringify({ key, value }),
-    }),
-  updateEnvVar: (repoId: number, varId: number, value: string) =>
-    request<{ message: string }>(`/repositories/${repoId}/env-vars/${varId}`, {
-      method: "PUT",
-      body: JSON.stringify({ value }),
-    }),
-  deleteEnvVar: (repoId: number, varId: number) =>
-    request<{ message: string }>(`/repositories/${repoId}/env-vars/${varId}`, {
-      method: "DELETE",
-    }),
-  importEnvVarsFromCompose: (id: number, compose_file: string) =>
-    request<{ message: string; keys: string[] }>(
-      `/repositories/${id}/env-vars/import-from-compose`,
-      {
-        method: "POST",
-        body: JSON.stringify({ compose_file }),
-      },
-    ),
 
   // Deployments
   listDeployments: () => request<Deployment[]>("/deployments"),
@@ -179,14 +163,6 @@ export interface ProxyRoute {
   status: string;
 }
 
-export interface EnvVar {
-  id: number;
-  repo_id: number;
-  key: string;
-  value: string;
-  created_at: string;
-  updated_at: string;
-}
 
 export interface Repository {
   id: number;
