@@ -55,7 +55,15 @@ async fn main() -> Result<()> {
 
     let admin_username = std::env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".into());
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "admin".into());
-    let admin_password_hash = bcrypt::hash(&admin_password, 4)?; // cost=4 for speed
+    let admin_password_hash = {
+        use argon2::password_hash::SaltString;
+        use argon2::{Argon2, PasswordHasher};
+        let salt = SaltString::generate(argon2::password_hash::rand_core::OsRng);
+        Argon2::default()
+            .hash_password(admin_password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("Failed to hash password: {}", e))?
+            .to_string()
+    };
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = std::env::var("PORT")

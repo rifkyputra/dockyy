@@ -57,11 +57,16 @@ async fn login(
         ));
     }
 
-    let valid = match bcrypt::verify(&body.password, &state.config.admin_password_hash) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(ip = %ip, username = %body.username, error = %e, "bcrypt::verify failed");
-            false
+    let valid = {
+        use argon2::{Argon2, PasswordVerifier, PasswordHash};
+        match PasswordHash::new(&state.config.admin_password_hash) {
+            Ok(parsed_hash) => Argon2::default()
+                .verify_password(body.password.as_bytes(), &parsed_hash)
+                .is_ok(),
+            Err(e) => {
+                tracing::error!(ip = %ip, username = %body.username, error = %e, "password hash parse failed");
+                false
+            }
         }
     };
 
