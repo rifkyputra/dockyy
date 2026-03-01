@@ -443,8 +443,20 @@ async fn docker_compose_up(
 
     let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
 
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.arg("compose").arg("-p").arg(&container_name);
+    // Use podman-compose or docker-compose (standalone), whichever is available
+    let compose_bin = if std::path::Path::new("/usr/bin/podman-compose").exists() {
+        "/usr/bin/podman-compose"
+    } else if std::path::Path::new("/usr/local/bin/podman-compose").exists() {
+        "/usr/local/bin/podman-compose"
+    } else if std::path::Path::new("/usr/bin/docker-compose").exists() {
+        "/usr/bin/docker-compose"
+    } else if std::path::Path::new("/usr/local/bin/docker-compose").exists() {
+        "/usr/local/bin/docker-compose"
+    } else {
+        "docker-compose"
+    };
+    let mut cmd = tokio::process::Command::new(compose_bin);
+    cmd.arg("-p").arg(&container_name);
 
     // Track temp file to clean up after compose runs
     let mut temp_override_path: Option<String> = None;
