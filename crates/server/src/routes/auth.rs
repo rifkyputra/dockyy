@@ -57,8 +57,13 @@ async fn login(
         ));
     }
 
-    let valid = bcrypt::verify(&body.password, &state.config.admin_password_hash)
-        .unwrap_or(false);
+    let valid = match bcrypt::verify(&body.password, &state.config.admin_password_hash) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(ip = %ip, username = %body.username, error = %e, "bcrypt::verify failed");
+            false
+        }
+    };
 
     if !valid {
         let _ = state.db.record_login_attempt(&ip, false);

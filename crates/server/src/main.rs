@@ -40,7 +40,10 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    dotenvy::dotenv().ok();
+    match dotenvy::dotenv() {
+        Ok(path) => tracing::info!("Loaded env from {}", path.display()),
+        Err(e) => tracing::warn!("No .env file loaded: {}", e),
+    }
 
     let data_dir = std::env::var("DOCKYY_DATA_DIR").unwrap_or_else(|_| "./data".into());
     std::fs::create_dir_all(&data_dir)?;

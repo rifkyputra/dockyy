@@ -10,14 +10,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
-  if (res.status === 401) {
-    localStorage.removeItem("dockyy_token");
-    window.location.reload();
-    throw new Error("Unauthorized");
-  }
-
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+
+    // Clear token and reload on 401 from authenticated routes (not login)
+    if (res.status === 401 && !path.startsWith("/auth/")) {
+      localStorage.removeItem("dockyy_token");
+      window.location.reload();
+    }
+
     throw new Error(body.error || `HTTP ${res.status}`);
   }
 
