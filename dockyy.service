@@ -1,0 +1,17 @@
+[Unit]
+Description=Dockyy Container Manager
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rifqempul/dockyy
+ExecStart=/home/rifqempul/dockyy/binary/x86_64/dockyy
+Restart=on-failure
+RestartSec=5
+
+# Ensure only one instance
+ExecStartPre=/usr/bin/bash -c '/usr/sbin/fuser -k 3010/tcp 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

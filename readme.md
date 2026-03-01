@@ -28,14 +28,61 @@ Open `http://localhost:3000` — login with `admin` / `admin`.
 
 ### Environment Variables
 
-| Variable          | Default   | Description               |
-| ----------------- | --------- | ------------------------- |
-| `HOST`            | `0.0.0.0` | Bind address              |
-| `PORT`            | `3000`    | Listen port               |
-| `ADMIN_USERNAME`  | `admin`   | Login username            |
-| `ADMIN_PASSWORD`  | `admin`   | Login password            |
-| `JWT_SECRET`      | (random)  | JWT signing secret        |
-| `DOCKYY_DATA_DIR` | `./data`  | SQLite database directory |
+| Variable             | Default     | Description                 |
+| -------------------- | ----------- | --------------------------- |
+| `HOST`               | `0.0.0.0`  | Bind address                |
+| `PORT`               | `3000`     | Listen port                 |
+| `ADMIN_USERNAME`     | `admin`    | Login username              |
+| `ADMIN_PASSWORD`     | `admin`    | Login password              |
+| `JWT_SECRET`         | (random)   | JWT signing secret          |
+| `DOCKYY_DATA_DIR`   | `./data`   | SQLite database directory   |
+| `TRAEFIK_HTTP_PORT`  | `80`       | Traefik reverse proxy port  |
+| `DISABLE_RATE_LIMIT` | `false`    | Disable login rate limiting |
+| `GIT_BIN`            | auto-detect | Path to git binary          |
+
+Create a `.env` file in the working directory (loaded automatically):
+
+```env
+PORT=3010
+JWT_SECRET=your-secret-here
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-password
+DOCKYY_DATA_DIR=/home/user/dockyy-data
+```
+
+## Deployment
+
+### Run as systemd Service (Recommended)
+
+```bash
+sudo cp dockyy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable dockyy
+sudo systemctl start dockyy
+```
+
+Manage the service:
+
+```bash
+sudo systemctl status dockyy      # Check status
+sudo systemctl restart dockyy     # Restart after deploy
+sudo systemctl stop dockyy        # Stop
+sudo journalctl -u dockyy -f      # Tail logs
+```
+
+### Deploy Workflow
+
+```bash
+# On dev machine
+make build-linux && make copy-all
+git add binary/x86_64/dockyy
+git commit -m "deploy: update binary"
+git push
+
+# On server
+git pull
+sudo systemctl restart dockyy
+```
 
 ## Features
 
