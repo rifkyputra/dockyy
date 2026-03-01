@@ -83,17 +83,12 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
 
     let git_bin = std::env::var("GIT_BIN").unwrap_or_else(|_| {
-        // Resolve absolute path so git works even with a minimal PATH (e.g. systemd)
-        String::from_utf8(
-            std::process::Command::new("which")
-                .arg("git")
-                .output()
-                .expect("failed to locate git – is it installed?")
-                .stdout,
-        )
-        .expect("invalid utf-8 from `which git`")
-        .trim()
-        .to_string()
+        for p in &["/usr/bin/git", "/usr/sbin/git", "/usr/local/bin/git", "/bin/git"] {
+            if std::path::Path::new(p).exists() {
+                return p.to_string();
+            }
+        }
+        "git".to_string()
     });
     tracing::info!("Using git binary: {}", git_bin);
 

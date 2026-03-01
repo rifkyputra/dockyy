@@ -413,19 +413,36 @@ async fn clone_repository(
         cmd.env("GIT_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no");
     }
 
+    tracing::info!(
+        git_bin = %state.config.git_bin,
+        repo_url = %repo.url,
+        repo_dir = %repo_dir,
+        "Cloning repository"
+    );
+
     let output = cmd
         .arg("clone")
         .arg(&repo.url)
         .arg(&repo_dir)
         .output()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            tracing::error!(
+                git_bin = %state.config.git_bin,
+                repo_url = %repo.url,
+                error = %e,
+                error_kind = ?e.kind(),
+                "Failed to spawn git process"
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to spawn git: {} (kind: {:?}, bin: {})", e, e.kind(), state.config.git_bin)})))
+        })?;
         
     if let Some(key_path) = temp_key_path {
         let _ = std::fs::remove_file(key_path);
     }
         
     if !output.status.success() {
+        
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()}))));
     }
     
