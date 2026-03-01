@@ -48,6 +48,14 @@ async fn login(
         }
     }
 
+    tracing::info!(
+        ip = %ip,
+        provided_username = %body.username,
+        expected_username = %state.config.admin_username,
+        hash_preview = %&state.config.admin_password_hash[..20],
+        "Login attempt received"
+    );
+
     if body.username != state.config.admin_username {
         let _ = state.db.record_login_attempt(&ip, false);
         tracing::warn!(ip = %ip, username = %body.username, "Failed login attempt: invalid username");
