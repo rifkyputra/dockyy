@@ -1,4 +1,29 @@
-.PHONY: dev build dashboard server clean docker
+.PHONY: setup dev build dashboard server clean docker
+
+# Install all required tooling (Rust, cargo-watch, Node.js via fnm)
+setup:
+	@echo "==> Checking Rust toolchain..."
+	@command -v rustup >/dev/null 2>&1 || { \
+		echo "Installing Rust via rustup..."; \
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
+		. "$$HOME/.cargo/env"; \
+	}
+	@echo "==> Ensuring stable toolchain..."
+	@rustup toolchain install stable
+	@rustup default stable
+	@echo "==> Installing cargo-watch..."
+	@command -v cargo-watch >/dev/null 2>&1 || cargo install cargo-watch
+	@echo "==> Checking Node.js..."
+	@command -v node >/dev/null 2>&1 || { \
+		echo "Node.js not found. Installing via fnm..."; \
+		command -v fnm >/dev/null 2>&1 || curl -fsSL https://fnm.vercel.app/install | bash; \
+		eval "$$(fnm env)"; \
+		fnm install --lts; \
+	}
+	@echo "==> Setup complete!"
+	@echo "    rust: $$(rustc --version)"
+	@echo "    cargo: $$(cargo --version)"
+	@echo "    node: $$(node --version)"
 
 run:
 	make build; pkill dockyy; sleep 2; ./target/release/dockyy

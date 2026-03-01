@@ -17,7 +17,7 @@ RUN cargo build --release
 
 # ── Runtime ──
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates docker-cli
+RUN apk add --no-cache ca-certificates docker-cli docker-cli-compose git openssh
 COPY --from=server /app/target/release/dockyy /usr/local/bin/dockyy
 EXPOSE 3000
 ENV DOCKYY_DATA_DIR=/data

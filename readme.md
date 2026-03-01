@@ -13,9 +13,10 @@ A blazingly fast, near-zero RAM Docker management dashboard and PaaS.
 
 ## Quick Start
 
-### Option 1: Binary
-
 ```bash
+# Install Rust, cargo-watch, and Node.js (skip if already installed)
+make setup
+
 # Build everything
 make build
 
@@ -24,14 +25,6 @@ make build
 ```
 
 Open `http://localhost:3000` — login with `admin` / `admin`.
-
-### Option 2: Docker
-
-```bash
-# Build & run
-make docker
-make docker-run
-```
 
 ### Environment Variables
 
