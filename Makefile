@@ -1,4 +1,4 @@
-.PHONY: setup dev build build-mac build-linux build-all dashboard server clean docker
+.PHONY: setup dev build build-mac build-linux build-all dashboard server clean docker copy copy-all
 
 # Install all required tooling (C toolchain, Rust, cargo-watch, Node.js via fnm)
 setup:
@@ -96,6 +96,26 @@ docker-run:
 		-e ADMIN_PASSWORD=admin \
 		-e JWT_SECRET=change-me \
 		dockyy:latest
+
+# Copy binaries to binary/{arch} directories
+copy:
+	@ARCH=$$(uname -m); \
+	if [ "$$ARCH" = "arm64" ]; then ARCH="aarch64"; fi; \
+	mkdir -p binary/$$ARCH; \
+	cp target/release/dockyy binary/$$ARCH/dockyy; \
+	echo "Copied to binary/$$ARCH/dockyy"
+
+# Copy all cross-compiled binaries
+copy-all:
+	@mkdir -p binary/aarch64 binary/x86_64
+	@if [ -f target/release/dockyy ]; then \
+		cp target/release/dockyy binary/$$(uname -m | sed 's/arm64/aarch64/')/dockyy; \
+		echo "Copied native binary to binary/$$(uname -m | sed 's/arm64/aarch64/')/dockyy"; \
+	fi
+	@if [ -f target/x86_64-unknown-linux-gnu/release/dockyy ]; then \
+		cp target/x86_64-unknown-linux-gnu/release/dockyy binary/x86_64/dockyy; \
+		echo "Copied linux binary to binary/x86_64/dockyy"; \
+	fi
 
 # Clean build artifacts
 clean:

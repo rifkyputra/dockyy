@@ -160,7 +160,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
     // 3. Clone or Pull
     if std::path::Path::new(&format!("{}/.git", repo_dir)).exists() {
         tracing::info!("Pulling repo {}", repo.name);
-        let output = Command::new("git")
+        let output = Command::new(&state.config.git_bin)
             .env("GIT_SSH_COMMAND", &git_ssh_command)
             .arg("-C")
             .arg(&repo_dir)
@@ -179,7 +179,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
         }
     } else {
         tracing::info!("Cloning repo {} to {}", repo.url, repo_dir);
-        let output = Command::new("git")
+        let output = Command::new(&state.config.git_bin)
             .env("GIT_SSH_COMMAND", &git_ssh_command)
             .arg("clone")
             .arg(&repo.url)

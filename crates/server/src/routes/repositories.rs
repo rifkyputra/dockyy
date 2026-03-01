@@ -390,8 +390,8 @@ async fn clone_repository(
     let _ = std::fs::remove_dir_all(&repo_dir);
     std::fs::create_dir_all(&repo_dir).unwrap();
     
-    let mut cmd = tokio::process::Command::new("git");
-    
+    let mut cmd = tokio::process::Command::new(&state.config.git_bin);
+
     let mut temp_key_path = None;
     if let Some(ssh_key) = &repo.ssh_password {
         if !ssh_key.trim().is_empty() {
@@ -570,7 +570,7 @@ async fn pull_repository(
         return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Repository not cloned"}))));
     }
     
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::new(&state.config.git_bin);
     cmd.current_dir(&repo_dir);
     
     let mut temp_key_path = None;
@@ -622,7 +622,7 @@ async fn fetch_repository(
         return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Repository not cloned"}))));
     }
     
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::new(&state.config.git_bin);
     cmd.current_dir(&repo_dir);
     
     let mut temp_key_path = None;
