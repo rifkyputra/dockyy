@@ -1,4 +1,4 @@
-.PHONY: setup dev build dashboard server clean docker
+.PHONY: setup dev build build-mac build-linux build-all dashboard server clean docker
 
 # Install all required tooling (C toolchain, Rust, cargo-watch, Node.js via fnm)
 setup:
@@ -53,14 +53,30 @@ dev:
 	@echo "Starting Rust server with live reload..."
 	RUST_LOG=dockyy=debug cargo watch -x run -w crates/server/src -i dashboard
 
-# Build everything
+# Build everything (native)
 build: dashboard server
+
+# Build for macOS (Apple Silicon + Intel universal)
+build-mac: dashboard
+	cargo build --release
+	@echo "Binary: target/release/dockyy ($$(ls -lh target/release/dockyy | awk '{print $$5}'))"
+
+# Build for Linux x86_64 (cross-compile via cargo-zigbuild)
+build-linux: dashboard
+	cargo zigbuild --release --target x86_64-unknown-linux-gnu
+	@echo "Binary: target/x86_64-unknown-linux-gnu/release/dockyy ($$(ls -lh target/x86_64-unknown-linux-gnu/release/dockyy | awk '{print $$5}'))"
+
+# Build for both macOS and Linux
+build-all: dashboard build-mac build-linux
+	@echo "==> All builds complete!"
+	@echo "  macOS:  target/release/dockyy"
+	@echo "  Linux:  target/x86_64-unknown-linux-gnu/release/dockyy"
 
 # Build dashboard static assets
 dashboard:
 	cd dashboard && npm install && npm run build
 
-# Build Rust server (release)
+# Build Rust server (release, native)
 server: dashboard
 	cargo build --release
 	@echo "Binary: target/release/dockyy ($$(ls -lh target/release/dockyy | awk '{print $$5}'))"

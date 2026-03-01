@@ -439,18 +439,12 @@ async fn docker_compose_up(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let repo = get_repository(State(state.clone()), Path(id)).await?.0;
     let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
-    let host_repo_dir = format!("{}/repos/{}", state.config.host_data_dir, id);
     let ovr_dir = override_dir(&state.config.data_dir, id);
 
     let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
 
     let mut cmd = tokio::process::Command::new("docker");
-    // Use --project-directory with the host-side path so Docker daemon
-    // resolves volume mounts and build contexts from the host filesystem
-    // (required when Dockyy runs in a container with the host's Docker socket)
-    cmd.arg("compose")
-        .arg("--project-directory").arg(&host_repo_dir)
-        .arg("-p").arg(&container_name);
+    cmd.arg("compose").arg("-p").arg(&container_name);
 
     // Track temp file to clean up after compose runs
     let mut temp_override_path: Option<String> = None;
@@ -480,11 +474,10 @@ async fn docker_compose_up(
                     Json(json!({"error": e.to_string()})),
                 )
             })?;
-            // Use host-side path for the override file too
-            cmd.arg("-f").arg(format!("{}/{}", host_repo_dir, tmp_name));
+            cmd.arg("-f").arg(&tmp_name);
             temp_override_path = Some(tmp_path);
         } else {
-            cmd.arg("-f").arg(format!("{}/{}", host_repo_dir, file));
+            cmd.arg("-f").arg(file);
         }
     }
 
@@ -492,6 +485,7 @@ async fn docker_compose_up(
         .arg("up")
         .arg("-d")
         .arg("--build")
+        .current_dir(&repo_dir)
         .output()
         .await
         .map_err(|e| {

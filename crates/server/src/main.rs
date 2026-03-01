@@ -26,6 +26,7 @@ pub struct AppConfig {
     pub data_dir: String,
     /// Host port Traefik listens on for HTTP traffic (default 80).
     pub traefik_http_port: u16,
+    pub disable_rate_limit: bool,
 }
 
 #[tokio::main]
@@ -75,6 +76,10 @@ async fn main() -> Result<()> {
         bollard::Docker::connect_with_local_defaults()?,
     );
 
+    let disable_rate_limit = std::env::var("DISABLE_RATE_LIMIT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let config = AppConfig {
         jwt_secret,
         admin_username,
@@ -83,6 +88,7 @@ async fn main() -> Result<()> {
         port,
         data_dir,
         traefik_http_port,
+        disable_rate_limit,
     };
 
     let state = Arc::new(AppState {

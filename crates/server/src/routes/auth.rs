@@ -25,25 +25,27 @@ async fn login(
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<Value>)> {
     let ip = addr.ip().to_string();
 
-    // Check rate limit
-    let (attempts, wait_seconds) = state
-        .db
-        .check_login_rate_limit(&ip)
-        .unwrap_or((0, 0));
+    // Check rate limit (skipped when DISABLE_RATE_LIMIT is set)
+    if !state.config.disable_rate_limit {
+        let (attempts, wait_seconds) = state
+            .db
+            .check_login_rate_limit(&ip)
+            .unwrap_or((0, 0));
 
-    if wait_seconds > 0 {
-        tracing::warn!(
-            ip = %ip,
-            attempts = attempts,
-            wait_seconds = wait_seconds,
-            "Login attempt rate-limited"
-        );
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "error": format!("Too many login attempts. Try again in {} seconds.", wait_seconds)
-            })),
-        ));
+        if wait_seconds > 0 {
+            tracing::warn!(
+                ip = %ip,
+                attempts = attempts,
+                wait_seconds = wait_seconds,
+                "Login attempt rate-limited"
+            );
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": format!("Too many login attempts. Try again in {} seconds.", wait_seconds)
+                })),
+            ));
+        }
     }
 
     if body.username != state.config.admin_username {
