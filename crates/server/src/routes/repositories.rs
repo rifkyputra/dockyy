@@ -1,11 +1,17 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, Sse},
     routing::{get, post, put},
     Json, Router,
 };
+use futures_util::stream::Stream;
+use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use std::process::Stdio;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::db::models::{
     CreateRepository, DockerComposeUpRequest, Repository, SaveComposeOverrideRequest,
@@ -29,6 +35,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/{id}/pull", post(pull_repository))
         .route("/repositories/{id}/fetch", post(fetch_repository))
         .route("/repositories/{id}/docker-compose-up", post(docker_compose_up))
+        .route("/repositories/{id}/docker-compose-up/stream", get(docker_compose_up_stream))
         .route(
             "/repositories/{id}/compose-files/{filename}",
             put(save_compose_override).delete(reset_compose_override),
@@ -449,19 +456,8 @@ async fn clone_repository(
     Ok(Json(json!({"message": "Repository cloned successfully"})))
 }
 
-async fn docker_compose_up(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-    Json(body): Json<DockerComposeUpRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let repo = get_repository(State(state.clone()), Path(id)).await?.0;
-    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
-    let ovr_dir = override_dir(&state.config.data_dir, id);
-
-    let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
-
-    // Use podman-compose or docker-compose (standalone), whichever is available
-    let compose_bin = if std::path::Path::new("/usr/bin/podman-compose").exists() {
+fn find_compose_bin() -> &'static str {
+    if std::path::Path::new("/usr/bin/podman-compose").exists() {
         "/usr/bin/podman-compose"
     } else if std::path::Path::new("/usr/local/bin/podman-compose").exists() {
         "/usr/local/bin/podman-compose"
@@ -471,37 +467,37 @@ async fn docker_compose_up(
         "/usr/local/bin/docker-compose"
     } else {
         "docker-compose"
-    };
-    let mut cmd = tokio::process::Command::new(compose_bin);
-    cmd.arg("-p").arg(&container_name);
+    }
+}
 
-    // Track temp file to clean up after compose runs
+fn setup_compose_cmd(
+    compose_bin: &str,
+    container_name: &str,
+    repo_dir: &str,
+    ovr_dir: &str,
+    compose_file: Option<&str>,
+) -> Result<(tokio::process::Command, Option<String>), (StatusCode, Json<Value>)> {
+    let mut cmd = tokio::process::Command::new(compose_bin);
+    cmd.arg("-p").arg(container_name);
+
     let mut temp_override_path: Option<String> = None;
 
-    if let Some(file) = &body.compose_file {
+    if let Some(file) = compose_file {
         if file.contains('/') || file.contains('\\') {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "Invalid compose file name"})),
             ));
         }
-        // Check if an override exists for this file
         let override_path = format!("{}/{}", ovr_dir, file);
         if std::path::Path::new(&override_path).exists() {
-            // Write override content to a temp file in the repo dir so relative paths work
             let tmp_name = format!(".dockyy-override-{}", file);
             let tmp_path = format!("{}/{}", repo_dir, tmp_name);
             let content = std::fs::read_to_string(&override_path).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
             })?;
             std::fs::write(&tmp_path, &content).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
             })?;
             cmd.arg("-f").arg(&tmp_name);
             temp_override_path = Some(tmp_path);
@@ -510,35 +506,198 @@ async fn docker_compose_up(
         }
     }
 
-    let output = cmd
-        .arg("up")
+    cmd.arg("up")
         .arg("-d")
         .arg("--build")
-        .current_dir(&repo_dir)
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
+        .current_dir(repo_dir)
+        .stdin(Stdio::null());
 
-    // Clean up temp override file
+    Ok((cmd, temp_override_path))
+}
+
+async fn docker_compose_up(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<DockerComposeUpRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let repo = get_repository(State(state.clone()), Path(id)).await?.0;
+    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
+    let ovr_dir = override_dir(&state.config.data_dir, id);
+    let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
+
+    let compose_bin = find_compose_bin();
+    let (mut cmd, temp_override_path) = setup_compose_cmd(
+        compose_bin, &container_name, &repo_dir, &ovr_dir, body.compose_file.as_deref(),
+    )?;
+
+    // Create deployment record
+    let deployment_id = state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO deployments (repo_id, status, domain, port) VALUES (?1, 'building', ?2, ?3)",
+            rusqlite::params![id, repo.domain, repo.proxy_port],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).map_err(|e: anyhow::Error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+
+    let output = cmd.output().await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+
     if let Some(tmp) = temp_override_path {
         let _ = std::fs::remove_file(tmp);
     }
 
+    let build_log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
     if !output.status.success() {
+        let _ = state.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE deployments SET status = 'failed', build_log = ?2, updated_at = datetime('now') WHERE id = ?1",
+                rusqlite::params![deployment_id, build_log],
+            )?;
+            Ok(())
+        });
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": String::from_utf8_lossy(&output.stderr).to_string()})),
         ));
     }
 
-    Ok(Json(json!({"message": "Deployment started with docker-compose"})))
+    let _ = state.db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE deployments SET status = 'success', build_log = ?2, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![deployment_id, build_log],
+        )?;
+        Ok(())
+    });
+
+    Ok(Json(json!({"message": "Deployment started with docker-compose", "deployment_id": deployment_id})))
 }
 
+#[derive(Deserialize)]
+struct ComposeStreamQuery {
+    compose_file: Option<String>,
+}
+
+async fn docker_compose_up_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(query): Query<ComposeStreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let repo = get_repository(State(state.clone()), Path(id)).await?.0;
+    let repo_dir = format!("{}/repos/{}", state.config.data_dir, id);
+    let ovr_dir = override_dir(&state.config.data_dir, id);
+    let container_name = format!("dockyy-{}", repo.name.to_lowercase().replace("/", "-"));
+
+    let compose_bin = find_compose_bin();
+    let (mut cmd, temp_override_path) = setup_compose_cmd(
+        compose_bin, &container_name, &repo_dir, &ovr_dir, query.compose_file.as_deref(),
+    )?;
+
+    // Create deployment record
+    let domain = repo.domain.clone();
+    let proxy_port = repo.proxy_port;
+    let deployment_id = state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO deployments (repo_id, status, domain, port) VALUES (?1, 'building', ?2, ?3)",
+            rusqlite::params![id, domain, proxy_port],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }).map_err(|e: anyhow::Error| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+    })?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Merge stdout and stderr into a single channel
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    if let Some(out) = stdout {
+        let tx2 = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(out).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx2.send(line).await;
+            }
+        });
+    }
+
+    if let Some(err_out) = stderr {
+        let tx2 = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(err_out).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx2.send(line).await;
+            }
+        });
+    }
+
+    drop(tx);
+
+    let stream = async_stream::stream! {
+        let mut build_log = String::new();
+
+        while let Some(line) = rx.recv().await {
+            build_log.push_str(&line);
+            build_log.push('\n');
+            yield Ok::<_, Infallible>(Event::default().data(line));
+        }
+
+        let status = child.wait().await;
+
+        if let Some(tmp) = temp_override_path {
+            let _ = std::fs::remove_file(tmp);
+        }
+
+        match status {
+            Ok(s) if s.success() => {
+                let _ = state.db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE deployments SET status = 'success', build_log = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        rusqlite::params![deployment_id, build_log],
+                    )?;
+                    Ok(())
+                });
+                yield Ok(Event::default().event("done").data("Compose finished successfully"));
+            }
+            Ok(s) => {
+                let _ = state.db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE deployments SET status = 'failed', build_log = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        rusqlite::params![deployment_id, build_log],
+                    )?;
+                    Ok(())
+                });
+                yield Ok(Event::default().event("error").data(format!("Compose exited with code {}", s.code().unwrap_or(-1))));
+            }
+            Err(e) => {
+                let _ = state.db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE deployments SET status = 'failed', build_log = ?2, updated_at = datetime('now') WHERE id = ?1",
+                        rusqlite::params![deployment_id, build_log],
+                    )?;
+                    Ok(())
+                });
+                yield Ok(Event::default().event("error").data(format!("Process error: {}", e)));
+            }
+        }
+    };
+
+    Ok(Sse::new(stream))
+}
 
 async fn save_compose_override(
     State(state): State<Arc<AppState>>,

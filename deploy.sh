@@ -11,6 +11,9 @@ ENV_FILE="$ENV_DIR/.env"
 echo "==> Pulling latest changes..."
 git pull
 
+echo "==> Stopping dockyy service (if running)..."
+sudo systemctl stop dockyy 2>/dev/null || true
+
 echo "==> Installing binary to $BINARY_DST..."
 sudo cp "$BINARY_SRC" "$BINARY_DST"
 sudo chmod +x "$BINARY_DST"

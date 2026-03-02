@@ -121,6 +121,68 @@ export const api = {
       body: JSON.stringify({ compose_file: composeFile || null }),
     }),
 
+  dockerComposeUpStream: (
+    id: number,
+    composeFile: string | undefined,
+    onLine: (line: string) => void,
+    onDone: (message: string) => void,
+    onError: (message: string) => void,
+  ): { abort: () => void } => {
+    const token = localStorage.getItem("dockyy_token");
+    const params = composeFile ? `?compose_file=${encodeURIComponent(composeFile)}` : "";
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/repositories/${id}/docker-compose-up/stream${params}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          onError(body.error || `HTTP ${res.status}`);
+          return;
+        }
+
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop()!;
+
+          for (const part of parts) {
+            let eventType = "message";
+            let data = "";
+            for (const line of part.split("\n")) {
+              if (line.startsWith("event:")) eventType = line.slice(6).trim();
+              else if (line.startsWith("data:")) data += line.slice(5);
+            }
+            if (eventType === "done") {
+              onDone(data);
+            } else if (eventType === "error") {
+              onError(data);
+            } else if (data) {
+              onLine(data);
+            }
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          onError((err as Error).message || "Stream failed");
+        }
+      }
+    })();
+
+    return { abort: () => controller.abort() };
+  },
+
   // Deployments
   listDeployments: () => request<Deployment[]>("/deployments"),
   listDeploymentsByRepo: (repoId: number) =>

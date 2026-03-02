@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, nextTick, onMounted, onUnmounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { marked } from "marked";
 import { api, type Repository, type Deployment } from "../api";
@@ -32,6 +32,12 @@ const proxyMsgOk = ref(true);
 
 // Action states
 const cloning = ref(false);
+
+// Compose stream log
+const showComposeLog = ref(false);
+const composeLogContent = ref("");
+const composeLogStatus = ref<"running" | "done" | "error">("running");
+let composeStream: { abort: () => void } | null = null;
 
 function showProxyMessage(text: string, ok = true) {
   proxyMsg.value = text;
@@ -104,13 +110,38 @@ async function fetchRepo() {
   }
 }
 
-async function composeUp(file: string) {
-  try {
-    await api.dockerComposeUp(Number(route.params.id), file);
-    load();
-  } catch (err: unknown) {
-    alert(err instanceof Error ? err.message : "Deployment failed");
-  }
+function composeUp(file: string) {
+  composeLogContent.value = "";
+  composeLogStatus.value = "running";
+  showComposeLog.value = true;
+
+  composeStream?.abort();
+  composeStream = api.dockerComposeUpStream(
+    Number(route.params.id),
+    file,
+    (line) => {
+      composeLogContent.value += line + "\n";
+      nextTick(() => {
+        const el = document.querySelector(".compose-log-output");
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+    (msg) => {
+      composeLogContent.value += "\n" + msg + "\n";
+      composeLogStatus.value = "done";
+      load();
+    },
+    (msg) => {
+      composeLogContent.value += "\nERROR: " + msg + "\n";
+      composeLogStatus.value = "error";
+    },
+  );
+}
+
+function closeComposeLog() {
+  showComposeLog.value = false;
+  composeStream?.abort();
+  composeStream = null;
 }
 
 function startEditCompose(cf: { path: string; content: string; override_content: string | null }) {
@@ -209,6 +240,9 @@ function renderMarkdown(content: string): string {
 }
 
 onMounted(load);
+onUnmounted(() => {
+  composeStream?.abort();
+});
 </script>
 
 <template>
@@ -379,6 +413,18 @@ onMounted(load);
       </div>
     </div>
   </div>
+
+  <!-- Compose Stream Log Modal -->
+  <LogModal :show="showComposeLog" title="Docker Compose" content="" @close="closeComposeLog">
+    <template #default>
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px">
+        <span v-if="composeLogStatus === 'running'" class="badge badge-warning">Running...</span>
+        <span v-else-if="composeLogStatus === 'done'" class="badge badge-success">Done</span>
+        <span v-else class="badge badge-danger">Error</span>
+      </div>
+      <pre class="compose-log-output" style="font-size: 12px; background: var(--bg-primary); padding: 16px; border-radius: var(--radius-sm); overflow: auto; max-height: 60vh; border: 1px solid var(--border); color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; word-break: break-all">{{ composeLogContent || "Waiting for output..." }}</pre>
+    </template>
+  </LogModal>
 
   <!-- Edit Repository Modal -->
   <LogModal :show="showEditModal" title="Edit Repository" content="" @close="showEditModal = false">
