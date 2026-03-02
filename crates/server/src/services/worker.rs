@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tokio::process::Command;
+use std::process::Stdio;
 use crate::AppState;
 use crate::db::models::{Job, Repository};
 use crate::services::traefik::{TraefikService, TRAEFIK_NETWORK};
@@ -208,6 +209,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
         .arg(&repo_dir)
         .arg("--name")
         .arg(&image_tag)
+        .stdin(Stdio::null())
         .output().await;
 
     let build_log = match build_output {
@@ -223,6 +225,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
                 .arg("-t")
                 .arg(&image_tag)
                 .arg(&repo_dir)
+                .stdin(Stdio::null())
                 .output().await?;
             if !dbuild.status.success() {
                 return Err(anyhow::anyhow!("Docker build failed: {}", String::from_utf8_lossy(&dbuild.stderr)));
@@ -236,6 +239,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
                 .arg("-t")
                 .arg(&image_tag)
                 .arg(&repo_dir)
+                .stdin(Stdio::null())
                 .output().await?;
              if !dbuild.status.success() {
                 return Err(anyhow::anyhow!("Docker build failed: {}", String::from_utf8_lossy(&dbuild.stderr)));
@@ -256,6 +260,7 @@ async fn handle_deploy_job(state: &Arc<AppState>, job: &Job) -> Result<()> {
 
     let mut run_cmd = Command::new("docker");
     run_cmd
+        .stdin(Stdio::null())
         .arg("run")
         .arg("-d")
         .arg("--name")
