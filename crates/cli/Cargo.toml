@@ -1,0 +1,16 @@
+[package]
+name = "kuadrat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kuadrat"
+path = "src/main.rs"
+
+[dependencies]
+kuadrat-core = { path = "../core" }
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde_json.workspace = true
