@@ -2,4 +2,5 @@
 //!
 //! This crate never opens a socket and never takes a host parameter.
 
+pub mod exec;
 pub mod spec;
