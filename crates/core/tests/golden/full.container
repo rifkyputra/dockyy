@@ -1,0 +1,22 @@
+# kuadrat-managed: true
+[Unit]
+Description=kuadrat workload pbrain api
+
+[Container]
+Image=docker.io/library/node:22-alpine
+ContainerName=kuadrat-pbrain-api
+PublishPort=3000:3000
+PublishPort=9229:9229
+Volume=/srv/pbrain:/app:Z
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Secret=db-password
+HealthCmd=curl -fsS http://localhost:3000/health
+Exec=node server.js --port 3000
+
+[Service]
+Restart=on-failure
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

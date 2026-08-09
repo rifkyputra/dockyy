@@ -4,3 +4,4 @@
 
 pub mod exec;
 pub mod spec;
+pub mod workloads;

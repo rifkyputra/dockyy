@@ -1,0 +1,13 @@
+# kuadrat-managed: true
+[Unit]
+Description=kuadrat workload pbrain
+
+[Container]
+Image=docker.io/library/node:22-alpine
+ContainerName=kuadrat-pbrain
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
