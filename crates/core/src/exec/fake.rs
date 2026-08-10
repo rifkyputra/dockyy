@@ -23,6 +23,7 @@ pub struct FakeExecutor {
     by_call: Mutex<HashMap<(String, Vec<String>), CommandOutput>>,
     by_program: Mutex<HashMap<String, CommandOutput>>,
     calls: Mutex<Vec<(String, Vec<String>)>>,
+    stdins: Mutex<Vec<String>>,
 }
 
 impl FakeExecutor {
@@ -57,16 +58,15 @@ impl FakeExecutor {
     pub fn calls(&self) -> Vec<(String, Vec<String>)> {
         self.calls.lock().expect("calls lock").clone()
     }
-}
 
-#[async_trait]
-impl Executor for FakeExecutor {
-    async fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
+    fn record_call(&self, program: &str, args: &[String]) {
         self.calls
             .lock()
             .expect("calls lock")
             .push((program.to_string(), args.to_vec()));
+    }
 
+    fn scripted(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         let key = (program.to_string(), args.to_vec());
         if let Some(output) = self
             .by_call
@@ -77,12 +77,39 @@ impl Executor for FakeExecutor {
         {
             return Ok(output);
         }
-
         self.by_program
             .lock()
             .expect("by_program lock")
             .get(program)
             .cloned()
             .ok_or_else(|| anyhow!("unexpected command: {program} {}", args.join(" ")))
+    }
+
+    /// Stdin values received, in order. Deliberately separate from `calls()` so
+    /// a secret value is never in the general call log.
+    pub fn stdins(&self) -> Vec<String> {
+        self.stdins.lock().expect("stdins lock").clone()
+    }
+}
+
+#[async_trait]
+impl Executor for FakeExecutor {
+    async fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
+        self.record_call(program, args);
+        self.scripted(program, args)
+    }
+
+    async fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[String],
+        stdin: &str,
+    ) -> Result<CommandOutput> {
+        self.record_call(program, args);
+        self.stdins
+            .lock()
+            .expect("stdins lock")
+            .push(stdin.to_string());
+        self.scripted(program, args)
     }
 }
