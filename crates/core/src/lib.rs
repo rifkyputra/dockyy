@@ -5,6 +5,8 @@
 //! Two seams carry every side effect: [`exec::Executor`] for processes and
 //! [`fs::FileSystem`] for storage. Nothing else in the crate touches the host.
 
+pub mod deploy;
+pub mod events;
 pub mod exec;
 pub mod fs;
 pub mod spec;
