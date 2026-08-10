@@ -1,0 +1,327 @@
+//! The deploy state machine. `run` sequences Detect → Build → Secrets → Apply →
+//! Route → Healthcheck, persisting the stage and emitting an event after each,
+//! under the per-app lock. G4b Task 2 adds the compensation matrix; until then a
+//! stage failure returns `Failed`.
+
+use std::path::Path;
+
+use anyhow::{bail, Context as _, Result};
+
+use crate::deploy::build::build;
+use crate::deploy::detect::detect;
+use crate::deploy::health::healthcheck;
+use crate::deploy::{Ctx, DeployOutcome, DeployStatus, Stage};
+use crate::events::{Event, EventStatus};
+use crate::gateway::apply_route;
+use crate::secrets::ensure_all;
+use crate::spec::WorkloadSpec;
+use crate::workloads::apply::apply;
+
+/// Deploy `spec` from the repo at `repo`. Returns the terminal outcome
+/// (`Done`/`RolledBack`/`Failed`); returns `Err` only when the deploy could not
+/// begin (invalid spec, or another deploy already holds the lock).
+pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<DeployOutcome> {
+    spec.validate()?;
+    let name = spec.name.clone();
+    let slug = spec.slug();
+
+    let previous = load_previous(ctx, &name)?;
+
+    let deploy_id = ctx.store.create_deploy(&name)?;
+    if !ctx.store.acquire_lock(&name, deploy_id)? {
+        ctx.store.finish_deploy(
+            deploy_id,
+            DeployStatus::Failed,
+            Some("another deploy is already in progress"),
+        )?;
+        bail!("another deploy of {name} is already in progress");
+    }
+
+    // Everything past the lock must release it, whatever happens.
+    let result = run_stages(ctx, spec, repo, &slug, deploy_id, &previous).await;
+    ctx.store.release_lock(&name)?;
+    result
+}
+
+fn load_previous(ctx: &Ctx<'_>, name: &str) -> Result<Option<WorkloadSpec>> {
+    match ctx.store.current_spec(name)? {
+        Some(json) => Ok(Some(
+            serde_json::from_str(&json).context("parsing the previously stored spec")?,
+        )),
+        None => Ok(None),
+    }
+}
+
+async fn run_stages(
+    ctx: &Ctx<'_>,
+    mut spec: WorkloadSpec,
+    repo: &Path,
+    slug: &str,
+    deploy_id: i64,
+    previous: &Option<WorkloadSpec>,
+) -> Result<DeployOutcome> {
+    begin(ctx, deploy_id, Stage::Detect)?;
+    let plan = match detect(ctx.exec, ctx.fsys, repo).await {
+        Ok(plan) => {
+            ok(ctx, deploy_id, Stage::Detect)?;
+            plan
+        }
+        Err(e) => return fail(ctx, deploy_id, &spec, slug, previous, Stage::Detect, e).await,
+    };
+
+    begin(ctx, deploy_id, Stage::Build)?;
+    let image = match build(ctx.exec, &plan, slug).await {
+        Ok(image) => {
+            ok(ctx, deploy_id, Stage::Build)?;
+            image
+        }
+        Err(e) => return fail(ctx, deploy_id, &spec, slug, previous, Stage::Build, e).await,
+    };
+    spec.image = image.clone();
+
+    begin(ctx, deploy_id, Stage::Secrets)?;
+    if let Err(e) = ensure_all(ctx.exec, &spec.secrets).await {
+        return fail(ctx, deploy_id, &spec, slug, previous, Stage::Secrets, e).await;
+    }
+    ok(ctx, deploy_id, Stage::Secrets)?;
+
+    begin(ctx, deploy_id, Stage::Apply)?;
+    if let Err(e) = apply(ctx.exec, ctx.fsys, ctx.paths, &spec).await {
+        return fail(ctx, deploy_id, &spec, slug, previous, Stage::Apply, e).await;
+    }
+    ok(ctx, deploy_id, Stage::Apply)?;
+
+    begin(ctx, deploy_id, Stage::Route)?;
+    if let Some(route) = &spec.route {
+        if let Err(e) = apply_route(ctx.exec, ctx.fsys, ctx.paths, slug, route).await {
+            return fail(ctx, deploy_id, &spec, slug, previous, Stage::Route, e).await;
+        }
+    }
+    ok(ctx, deploy_id, Stage::Route)?;
+
+    begin(ctx, deploy_id, Stage::Healthcheck)?;
+    if let Err(e) = healthcheck(ctx.exec, &spec).await {
+        return fail(ctx, deploy_id, &spec, slug, previous, Stage::Healthcheck, e).await;
+    }
+    ok(ctx, deploy_id, Stage::Healthcheck)?;
+
+    let json = serde_json::to_string(&spec).context("serializing the deployed spec")?;
+    ctx.store.put_spec(&spec.name, slug, &json)?;
+    ctx.store
+        .finish_deploy(deploy_id, DeployStatus::Done, None)?;
+    Ok(DeployOutcome::Done { image })
+}
+
+/// Advance the durable stage and emit a Started event.
+fn begin(ctx: &Ctx<'_>, deploy_id: i64, stage: Stage) -> Result<()> {
+    ctx.store.advance_stage(deploy_id, stage)?;
+    ctx.store.append_event(&Event {
+        deploy_id,
+        stage,
+        status: EventStatus::Started,
+        detail: None,
+    })?;
+    Ok(())
+}
+
+/// Emit a Succeeded event for a stage.
+fn ok(ctx: &Ctx<'_>, deploy_id: i64, stage: Stage) -> Result<()> {
+    ctx.store.append_event(&Event {
+        deploy_id,
+        stage,
+        status: EventStatus::Succeeded,
+        detail: None,
+    })?;
+    Ok(())
+}
+
+/// Handle a stage failure. G4b Task 1: no compensation — record it and return
+/// `Failed`. Task 2 replaces the body with the compensation matrix.
+async fn fail(
+    ctx: &Ctx<'_>,
+    deploy_id: i64,
+    _spec: &WorkloadSpec,
+    _slug: &str,
+    _previous: &Option<WorkloadSpec>,
+    stage: Stage,
+    err: anyhow::Error,
+) -> Result<DeployOutcome> {
+    let cause = format!("{err:#}");
+    ctx.store.append_event(&Event {
+        deploy_id,
+        stage,
+        status: EventStatus::Failed,
+        detail: Some(cause.clone()),
+    })?;
+    ctx.store
+        .finish_deploy(deploy_id, DeployStatus::Failed, Some(&cause))?;
+    Ok(DeployOutcome::Failed {
+        failed_at: stage,
+        cause,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::fake::FakeExecutor;
+    use crate::exec::CommandOutput;
+    use crate::fs::fake::FakeFileSystem;
+    use crate::spec::WorkloadSpec;
+    use crate::store::Store;
+    use crate::workloads::paths::Paths;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn out(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// Script a `FakeExecutor` for a clean deploy of an app with no secrets,
+    /// no route, and no health_cmd. `start_result` lets a test fail the Apply.
+    fn script_clean(exec: &FakeExecutor, sha: &str, slug: &str, start_result: CommandOutput) {
+        exec.expect_call(
+            "git",
+            &["-C", "/repo", "rev-parse", "HEAD"],
+            out(0, &format!("{sha}\n"), ""),
+        );
+        exec.expect_call(
+            "podman",
+            &[
+                "build",
+                "-t",
+                &format!("localhost/kuadrat-{slug}:{sha}"),
+                "-f",
+                "/repo/Containerfile",
+                "/repo",
+            ],
+            out(0, "", ""),
+        );
+        exec.expect_call(
+            "podman",
+            &["secret", "ls", "--format", "{{.Name}}"],
+            out(0, "", ""),
+        );
+        exec.expect_call("systemctl", &["daemon-reload"], out(0, "", ""));
+        exec.expect_call(
+            "systemctl",
+            &["start", &format!("kuadrat-{slug}")],
+            start_result,
+        );
+        exec.expect_call(
+            "systemctl",
+            &["is-active", &format!("kuadrat-{slug}")],
+            out(0, "active\n", ""),
+        );
+    }
+
+    fn fsys_with_repo() -> FakeFileSystem {
+        let fsys = FakeFileSystem::new();
+        fsys.insert("/repo/Containerfile", "FROM alpine\n");
+        fsys
+    }
+
+    #[tokio::test]
+    async fn a_clean_deploy_runs_every_stage_and_returns_done() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+        let exec = FakeExecutor::new();
+        script_clean(&exec, "abc123", "web", out(0, "", ""));
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("deploy");
+
+        assert_eq!(
+            outcome,
+            DeployOutcome::Done {
+                image: "localhost/kuadrat-web:abc123".into()
+            }
+        );
+        // The lock was released: a fresh acquire succeeds.
+        assert!(store.acquire_lock("web", 999).unwrap());
+        // The spec was stored.
+        assert!(store.current_spec("web").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_stage_failure_returns_failed_and_releases_the_lock() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+        let exec = FakeExecutor::new();
+        // Apply's `start` fails; healthcheck is never reached.
+        script_clean(&exec, "abc123", "web", out(1, "", "boom"));
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("run returns a terminal outcome, not an error");
+
+        match outcome {
+            DeployOutcome::Failed { failed_at, .. } => assert_eq!(failed_at, Stage::Apply),
+            other => panic!("expected Failed at Apply, got {other:?}"),
+        }
+        assert!(
+            store.acquire_lock("web", 999).unwrap(),
+            "lock must be released even on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_deploy_is_rejected_while_the_lock_is_held() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+        let exec = FakeExecutor::new(); // no stage runs, so nothing to script
+
+        // Another deploy already holds the lock.
+        let other = store.create_deploy("web").unwrap();
+        store.acquire_lock("web", other).unwrap();
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let err = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("already in progress"),
+            "message: {err}"
+        );
+    }
+}
