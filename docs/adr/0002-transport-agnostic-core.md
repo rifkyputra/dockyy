@@ -19,7 +19,13 @@ surface for agents.
 ## Decision
 
 Put the engine in a **library crate, `kuadrat-core`, that never opens a socket and never takes
-a host parameter.** Every host interaction goes through an **`Executor` trait**.
+a host parameter.** Every host interaction goes through a trait. There are **two** such traits,
+because a host is touched in two ways:
+
+- **`Executor`** — process execution: every `podman` and `systemctl` invocation.
+- **`FileSystem`** — storage: reading, writing, and listing unit files.
+
+Neither takes a host parameter. A transport supplies an implementation of each.
 
 Binaries (`daemon`, `cli`) are thin orchestration over the crate. Everything network-facing —
 HTTP, MCP, auth — lives in the daemon.
@@ -32,9 +38,18 @@ The invariant, stated so violations are obvious in review:
 
 **What this buys**
 
-- **The fleet driver becomes additive.** A remote executor running commands over SSH is a new
-  `Executor` implementation, not a change to the engine. Multi-host stops being a rewrite and
-  becomes a new consumer.
+- **The fleet driver becomes additive.** A remote transport over SSH is a new `Executor`
+  implementation *plus* a new `FileSystem` implementation, not a change to the engine.
+  Multi-host stops being a rewrite and becomes a new consumer.
+
+  This originally read "a new `Executor` implementation" alone, and that was false: `Executor`
+  covers processes only, so every unit-file write still went to local disk. An `SshExecutor`
+  would have written the unit locally and then run `daemon-reload` remotely — not degraded,
+  incoherent. Local testing hid it, because `Paths::rooted()` makes the filesystem and the
+  process host the same machine, so the seam looks complete precisely where the topology never
+  separates the two things it exists to separate. Corrected during the phase-1 whole-branch
+  review (finding C3): the `FileSystem` seam closes the gap, and the claim now holds for both
+  kinds of side effect.
 - **Failure paths become testable.** A fake executor lets tests force a failure at any deploy
   stage and assert the compensation ran. Rollback and crash-recovery are exactly the paths that
   cannot be safely exercised in production and will not be exercised by hand.
@@ -47,12 +62,20 @@ The invariant, stated so violations are obvious in review:
 **What this costs**
 
 - **Indirection.** Every `podman` and `systemctl` call goes through a trait rather than
-  `Command::new`, which is slightly more ceremony to read and write.
+  `Command::new`, and every file operation through a trait rather than `tokio::fs`, which is
+  slightly more ceremony to read and write. Engine functions take both seams as parameters.
 - **Discipline is required.** The invariant is easy to violate under deadline — one `host`
   parameter "just for this one call" collapses the boundary. Hence stating it as a failure
   condition rather than a preference, and putting it in the plan's global constraints.
-- **No direct process spawning outside `exec::local`.** A rule reviewers must enforce, since
-  nothing in the compiler prevents it.
+- **No direct side effects outside the two local implementations.** A rule reviewers must
+  enforce, since nothing in the compiler prevents it. Two clauses, both greppable:
+
+  1. `tokio::process::Command` appears only in `exec::local`.
+  2. `tokio::fs` appears only in `fs::local` — and neither does `std::fs`, nor
+     `Path::exists()`, which is the same violation wearing a different name.
+
+  Outside `kuadrat-core` the rule does not apply: the CLI reading a spec file off the
+  operator's own disk is not a host interaction.
 
 **Rejected alternatives**
 

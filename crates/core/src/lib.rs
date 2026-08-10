@@ -2,6 +2,10 @@
 //!
 //! This crate never opens a socket and never takes a host parameter.
 
+//! Two seams carry every side effect: [`exec::Executor`] for processes and
+//! [`fs::FileSystem`] for storage. Nothing else in the crate touches the host.
+
 pub mod exec;
+pub mod fs;
 pub mod spec;
 pub mod workloads;
