@@ -31,6 +31,8 @@ enum Command {
     Status { name: String },
     /// List kuadrat-managed workloads
     List,
+    /// Build a repo's image without deploying it
+    Build { path: std::path::PathBuf },
 }
 
 #[tokio::main]
@@ -63,6 +65,18 @@ async fn main() -> Result<()> {
             for name in list(&fsys, &paths).await? {
                 println!("{name}");
             }
+        }
+        Command::Build { path } => {
+            use kuadrat_core::deploy::{build::build, detect::detect};
+            use kuadrat_core::spec::slug;
+
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("path has no final component to name the app after")?;
+            let plan = detect(&exec, &fsys, &path).await?;
+            let image = build(&exec, &plan, &slug(name)).await?;
+            println!("{image}");
         }
     }
 
