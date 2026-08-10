@@ -325,8 +325,12 @@ Closed as part of this work:
   ownership check rather than a second one.
 - **`thiserror` unused** — `DeployError` uses it.
 - **Slug collisions** — the store rejects a second app whose slug collides with an existing one.
-- **`%` specifier escaping** — closed with secrets, as the note predicted: `validate()` gains `%`
-  handling for `Exec=` and `Environment=`.
 - **`Paths` reachable by two public paths** and **no crate-root API surface** — fold into task 1,
   once the phase-2 surface is known.
 - **Validation boundary is apply-only** — `remove` and `status` validate too.
+
+Still open, deferred to G4:
+
+- **`%` specifier escaping** — deferred to G4, where `Environment=`/secret-refs render into the
+  unit: `validate()` gains `%` handling for `Exec=` and `Environment=` there. G3 did not touch
+  `spec.rs`; the item is orthogonal to stdin secret-value handling.

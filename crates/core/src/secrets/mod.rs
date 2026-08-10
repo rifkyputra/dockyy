@@ -128,6 +128,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_creates_when_the_secret_is_new() {
+        let exec = FakeExecutor::new();
+        // The secret does not exist yet, so the best-effort rm fails — set must ignore that.
+        exec.expect_call(
+            "podman",
+            &["secret", "rm", "fresh"],
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "no such secret".into(),
+            },
+        );
+        exec.expect_call("podman", &["secret", "create", "fresh", "-"], ok(""));
+
+        set(&exec, "fresh", "v").await.expect("set on a new name");
+        assert_eq!(exec.stdins(), vec!["v".to_string()]);
+    }
+
+    #[tokio::test]
     async fn set_fails_without_echoing_the_value() {
         let exec = FakeExecutor::new();
         exec.expect_call("podman", &["secret", "rm", "db-pw"], ok(""));
