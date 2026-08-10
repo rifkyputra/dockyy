@@ -1,0 +1,14 @@
+# kuadrat-managed: true
+[Unit]
+Description=kuadrat workload shell
+
+[Container]
+Image=docker.io/library/alpine:3.20
+ContainerName=kuadrat-shell
+Exec=sh -c "echo hello world" "say \"hi\""
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

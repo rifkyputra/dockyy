@@ -12,6 +12,24 @@ pub fn container_name(spec: &WorkloadSpec) -> String {
     format!("{UNIT_PREFIX}{}", slug(&spec.name))
 }
 
+/// Quote one `Exec=` argument per systemd's exec syntax.
+///
+/// systemd splits `Exec=` on whitespace, so an argument containing a space becomes two
+/// arguments unless it is quoted. Inside double quotes systemd honours C-style escapes,
+/// so `\` and `"` must be escaped.
+fn quote_exec_arg(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'));
+
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 /// Render a spec to Quadlet `.container` unit text. Pure — no I/O.
 ///
 /// Validates first: a spec that would inject directives never gets rendered, so no caller
@@ -46,7 +64,8 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
         out.push_str(&format!("HealthCmd={health}\n"));
     }
     if let Some(command) = &spec.command {
-        out.push_str(&format!("Exec={}\n", command.join(" ")));
+        let argv: Vec<String> = command.iter().map(|a| quote_exec_arg(a)).collect();
+        out.push_str(&format!("Exec={}\n", argv.join(" ")));
     }
     out.push('\n');
 
@@ -96,6 +115,31 @@ mod tests {
 
         let expected = include_str!("../../tests/golden/full.container");
         assert_eq!(render(&spec).expect("render"), expected);
+    }
+
+    #[test]
+    fn renders_spec_with_spaced_command_arguments() {
+        let mut spec = WorkloadSpec::new("shell", "docker.io/library/alpine:3.20");
+        spec.command = Some(vec![
+            "sh".into(),
+            "-c".into(),
+            "echo hello world".into(),
+            "say \"hi\"".into(),
+        ]);
+
+        let expected = include_str!("../../tests/golden/spaced-exec.container");
+        assert_eq!(render(&spec).expect("render"), expected);
+    }
+
+    #[test]
+    fn exec_quotes_only_the_arguments_that_need_it() {
+        assert_eq!(quote_exec_arg("node"), "node");
+        assert_eq!(quote_exec_arg("--port"), "--port");
+        assert_eq!(quote_exec_arg("echo hello world"), "\"echo hello world\"");
+        assert_eq!(quote_exec_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quote_exec_arg("a\\b"), "\"a\\\\b\"");
+        assert_eq!(quote_exec_arg("it's"), "\"it's\"");
+        assert_eq!(quote_exec_arg(""), "\"\"");
     }
 
     #[test]
