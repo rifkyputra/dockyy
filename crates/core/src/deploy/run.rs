@@ -1,7 +1,7 @@
 //! The deploy state machine. `run` sequences Detect → Build → Secrets → Apply →
 //! Route → Healthcheck, persisting the stage and emitting an event after each,
-//! under the per-app lock. G4b Task 2 adds the compensation matrix; until then a
-//! stage failure returns `Failed`.
+//! under the per-app lock. A stage failure compensates backward, returning
+//! `RolledBack` when the undo succeeds and `Failed` when it also fails.
 
 use std::path::Path;
 
@@ -12,10 +12,10 @@ use crate::deploy::detect::detect;
 use crate::deploy::health::healthcheck;
 use crate::deploy::{Ctx, DeployOutcome, DeployStatus, Stage};
 use crate::events::{Event, EventStatus};
-use crate::gateway::apply_route;
+use crate::gateway::{apply_route, remove_route};
 use crate::secrets::ensure_all;
 use crate::spec::WorkloadSpec;
-use crate::workloads::apply::apply;
+use crate::workloads::apply::{apply, remove};
 
 /// Deploy `spec` from the repo at `repo`. Returns the terminal outcome
 /// (`Done`/`RolledBack`/`Failed`); returns `Err` only when the deploy could not
@@ -135,14 +135,14 @@ fn ok(ctx: &Ctx<'_>, deploy_id: i64, stage: Stage) -> Result<()> {
     Ok(())
 }
 
-/// Handle a stage failure. G4b Task 1: no compensation — record it and return
-/// `Failed`. Task 2 replaces the body with the compensation matrix.
+/// Handle a stage failure: compensate backward. `RolledBack` when the undo
+/// succeeds; `Failed` when compensation also fails (host state is unknown).
 async fn fail(
     ctx: &Ctx<'_>,
     deploy_id: i64,
-    _spec: &WorkloadSpec,
-    _slug: &str,
-    _previous: &Option<WorkloadSpec>,
+    spec: &WorkloadSpec,
+    slug: &str,
+    previous: &Option<WorkloadSpec>,
     stage: Stage,
     err: anyhow::Error,
 ) -> Result<DeployOutcome> {
@@ -153,12 +153,63 @@ async fn fail(
         status: EventStatus::Failed,
         detail: Some(cause.clone()),
     })?;
-    ctx.store
-        .finish_deploy(deploy_id, DeployStatus::Failed, Some(&cause))?;
-    Ok(DeployOutcome::Failed {
-        failed_at: stage,
-        cause,
-    })
+
+    match compensate(ctx, &spec.name, slug, previous, stage).await {
+        Ok(()) => {
+            ctx.store
+                .finish_deploy(deploy_id, DeployStatus::RolledBack, Some(&cause))?;
+            Ok(DeployOutcome::RolledBack {
+                failed_at: stage,
+                cause,
+            })
+        }
+        Err(comp) => {
+            let combined = format!("{cause}; compensation also failed: {comp:#}");
+            ctx.store
+                .finish_deploy(deploy_id, DeployStatus::Failed, Some(&combined))?;
+            Ok(DeployOutcome::Failed {
+                failed_at: stage,
+                cause: combined,
+            })
+        }
+    }
+}
+
+/// Undo the host changes made before `failed_at`, walking backward.
+async fn compensate(
+    ctx: &Ctx<'_>,
+    name: &str,
+    slug: &str,
+    previous: &Option<WorkloadSpec>,
+    failed_at: Stage,
+) -> Result<()> {
+    match failed_at {
+        // The host was never touched — the old version is still serving.
+        Stage::Detect | Stage::Build | Stage::Secrets => Ok(()),
+        Stage::Apply => unwind_apply(ctx, name, previous).await,
+        Stage::Route | Stage::Healthcheck => {
+            unwind_route(ctx, slug, previous).await?;
+            unwind_apply(ctx, name, previous).await
+        }
+    }
+}
+
+/// Restore the previous unit (re-apply the previous spec), or remove the unit
+/// this deploy wrote when there was no previous.
+async fn unwind_apply(ctx: &Ctx<'_>, name: &str, previous: &Option<WorkloadSpec>) -> Result<()> {
+    match previous {
+        Some(prev) => apply(ctx.exec, ctx.fsys, ctx.paths, prev).await,
+        None => remove(ctx.exec, ctx.fsys, ctx.paths, name).await,
+    }
+}
+
+/// Restore the previous route, or remove the route this deploy wrote when there
+/// was no previous route.
+async fn unwind_route(ctx: &Ctx<'_>, slug: &str, previous: &Option<WorkloadSpec>) -> Result<()> {
+    match previous.as_ref().and_then(|p| p.route.as_ref()) {
+        Some(prev_route) => apply_route(ctx.exec, ctx.fsys, ctx.paths, slug, prev_route).await,
+        None => remove_route(ctx.exec, ctx.fsys, ctx.paths, slug).await,
+    }
 }
 
 #[cfg(test)]
@@ -261,14 +312,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stage_failure_returns_failed_and_releases_the_lock() {
+    async fn a_first_deploy_failing_at_apply_rolls_back_by_removing_the_unit() {
         let dir = tempdir().unwrap();
         let store = Store::open(&dir.path().join("k.db")).unwrap();
         let paths = Paths::rooted(dir.path());
         let fsys = fsys_with_repo();
         let exec = FakeExecutor::new();
-        // Apply's `start` fails; healthcheck is never reached.
+        // Apply writes the unit, daemon-reload ok, start FAILS.
         script_clean(&exec, "abc123", "web", out(1, "", "boom"));
+        // Compensation: no previous spec → remove the unit we just wrote.
+        exec.expect_call("systemctl", &["stop", "kuadrat-web"], out(0, "", ""));
+        // (remove also runs a second daemon-reload — already scripted by script_clean)
 
         let ctx = Ctx {
             exec: &exec,
@@ -282,16 +336,88 @@ mod tests {
             Path::new("/repo"),
         )
         .await
-        .expect("run returns a terminal outcome, not an error");
+        .expect("terminal outcome");
 
         match outcome {
-            DeployOutcome::Failed { failed_at, .. } => assert_eq!(failed_at, Stage::Apply),
-            other => panic!("expected Failed at Apply, got {other:?}"),
+            DeployOutcome::RolledBack { failed_at, .. } => assert_eq!(failed_at, Stage::Apply),
+            other => panic!("expected RolledBack at Apply, got {other:?}"),
         }
+        // The half-written unit was removed by compensation.
+        let unit = paths.quadlet_dir.join("kuadrat-web.container");
         assert!(
-            store.acquire_lock("web", 999).unwrap(),
-            "lock must be released even on failure"
+            fsys.contents(&unit).is_none(),
+            "the unit should have been removed"
         );
+        assert!(store.acquire_lock("web", 999).unwrap(), "lock released");
+    }
+
+    #[tokio::test]
+    async fn a_failure_at_healthcheck_unwinds_route_then_apply() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+        let exec = FakeExecutor::new();
+
+        // Full forward path succeeds until healthcheck. No route on the spec, so
+        // Route runs no command; is-active reports NOT active → Healthcheck fails.
+        exec.expect_call(
+            "git",
+            &["-C", "/repo", "rev-parse", "HEAD"],
+            out(0, "abc123\n", ""),
+        );
+        exec.expect_call(
+            "podman",
+            &[
+                "build",
+                "-t",
+                "localhost/kuadrat-web:abc123",
+                "-f",
+                "/repo/Containerfile",
+                "/repo",
+            ],
+            out(0, "", ""),
+        );
+        exec.expect_call(
+            "podman",
+            &["secret", "ls", "--format", "{{.Name}}"],
+            out(0, "", ""),
+        );
+        exec.expect_call("systemctl", &["daemon-reload"], out(0, "", ""));
+        exec.expect_call("systemctl", &["start", "kuadrat-web"], out(0, "", ""));
+        exec.expect_call(
+            "systemctl",
+            &["is-active", "kuadrat-web"],
+            out(3, "failed\n", ""),
+        );
+        // Compensation for a Healthcheck failure: unwind_route then unwind_apply.
+        // The spec has no route, so no fragment was written — `remove_route` sees
+        // an absent (unowned) fragment and returns early WITHOUT reloading Caddy,
+        // so there is NO `reload caddy` call to script. unwind_apply has no
+        // previous spec, so it removes the unit: `stop` then `daemon-reload`
+        // (daemon-reload is already scripted above).
+        exec.expect_call("systemctl", &["stop", "kuadrat-web"], out(0, "", ""));
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("terminal outcome");
+
+        match outcome {
+            DeployOutcome::RolledBack { failed_at, .. } => {
+                assert_eq!(failed_at, Stage::Healthcheck)
+            }
+            other => panic!("expected RolledBack at Healthcheck, got {other:?}"),
+        }
     }
 
     #[tokio::test]
