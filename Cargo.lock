@@ -244,6 +244,7 @@ dependencies = [
  "clap",
  "kuadrat-core",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

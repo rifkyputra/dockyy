@@ -7,6 +7,8 @@ use kuadrat_core::spec::WorkloadSpec;
 use kuadrat_core::workloads::apply::{apply, remove, Paths};
 use kuadrat_core::workloads::query::{list, status};
 
+mod resolve;
+
 #[derive(Parser)]
 #[command(
     name = "kuadrat",
@@ -33,6 +35,14 @@ enum Command {
     List,
     /// Build a repo's image without deploying it
     Build { path: std::path::PathBuf },
+    /// Build and deploy an app from a local repo
+    Deploy {
+        app: String,
+        path: std::path::PathBuf,
+        /// Route this app: domain:port (e.g. example.com:3000)
+        #[arg(long)]
+        route: Option<String>,
+    },
     /// Manage podman secrets (values read from stdin, never argv)
     Secret {
         #[command(subcommand)]
@@ -95,6 +105,39 @@ async fn main() -> Result<()> {
             let plan = detect(&exec, &fsys, &abs).await?;
             let image = build(&exec, &plan, &slug(name)).await?;
             println!("{image}");
+        }
+        Command::Deploy { app, path, route } => {
+            use kuadrat_core::deploy::{run, Ctx, DeployOutcome};
+            use kuadrat_core::spec::Route;
+            use kuadrat_core::store::Store;
+
+            let route_override = match route {
+                Some(s) => {
+                    let (domain, port) =
+                        s.rsplit_once(':').context("--route must be domain:port")?;
+                    Some(Route {
+                        domain: domain.to_string(),
+                        port: port.parse().context("--route port must be a number")?,
+                    })
+                }
+                None => None,
+            };
+
+            let store = Store::open(&paths.db_path)?;
+            let spec = resolve::resolve_spec(&app, &path, &store, route_override)?;
+            let ctx = Ctx {
+                exec: &exec,
+                fsys: &fsys,
+                store: &store,
+                paths: &paths,
+            };
+            let outcome = run(&ctx, spec, &path).await?;
+            println!("{outcome:?}");
+            // A rolled-back or failed deploy exits non-zero (CI-friendly); only
+            // `Done` is success.
+            if !matches!(outcome, DeployOutcome::Done { .. }) {
+                std::process::exit(1);
+            }
         }
         Command::Secret { action } => {
             use kuadrat_core::secrets;
