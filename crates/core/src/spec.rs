@@ -1,6 +1,14 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+/// A public route: a domain reverse-proxied to a local port. Rendered into a
+/// Caddy fragment by the `gateway` module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Route {
+    pub domain: String,
+    pub port: u16,
+}
+
 /// How systemd should restart the workload.
 ///
 /// `#[default]` on the variant rather than a manual `impl Default` — clippy's
@@ -38,6 +46,7 @@ pub struct WorkloadSpec {
     pub memory_max: Option<String>,
     pub health_cmd: Option<String>,
     pub restart_policy: RestartPolicy,
+    pub route: Option<Route>,
 }
 
 impl WorkloadSpec {
@@ -95,6 +104,17 @@ impl WorkloadSpec {
         }
         for (i, arg) in self.command.iter().flatten().enumerate() {
             single_line(&format!("command[{i}]"), arg)?;
+        }
+
+        if self.route.is_some() && self.health_cmd.is_none() {
+            bail!(
+                "workload {:?} declares a route but no health_cmd: public traffic \
+                 must not reach a service with no readiness check",
+                self.name
+            );
+        }
+        if let Some(route) = &self.route {
+            single_line("route domain", &route.domain)?;
         }
 
         Ok(())
@@ -226,6 +246,40 @@ mod tests {
         let mut spec = WorkloadSpec::new("pbrain", "node:22-alpine");
         spec.ports.push("3000:3000".to_string());
         spec.secrets.push("db-password".to_string());
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let back: WorkloadSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn validate_rejects_a_route_without_a_health_cmd() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.route = Some(Route {
+            domain: "example.com".into(),
+            port: 3000,
+        });
+        let err = spec.validate().unwrap_err();
+        assert!(err.to_string().contains("health_cmd"), "message was: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_route_with_a_health_cmd() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.route = Some(Route {
+            domain: "example.com".into(),
+            port: 3000,
+        });
+        spec.health_cmd = Some("curl -fsS http://localhost:3000/health".into());
+        spec.validate().expect("valid");
+    }
+
+    #[test]
+    fn a_spec_with_a_route_round_trips_through_json() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.route = Some(Route {
+            domain: "example.com".into(),
+            port: 3000,
+        });
         let json = serde_json::to_string(&spec).expect("serialize");
         let back: WorkloadSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(spec, back);

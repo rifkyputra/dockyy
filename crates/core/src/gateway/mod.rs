@@ -9,15 +9,9 @@ use anyhow::{bail, Result};
 use crate::exec::Executor;
 use crate::fs::FileSystem;
 use crate::managed::ensure_owned;
+use crate::spec::Route;
 use crate::workloads::paths::Paths;
 use crate::workloads::render::MANAGED_MARKER;
-
-/// A public route: a domain reverse-proxied to a local port.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Route {
-    pub domain: String,
-    pub port: u16,
-}
 
 /// Render the Caddy fragment for a route. Pure — no I/O. Caddy auto-provisions
 /// TLS for a public domain.
