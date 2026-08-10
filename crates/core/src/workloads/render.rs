@@ -1,15 +1,24 @@
+use anyhow::Result;
+
 use crate::spec::{slug, WorkloadSpec};
+use crate::workloads::paths::UNIT_PREFIX;
 
 /// Marker identifying a unit file kuadrat generated and may overwrite.
 pub const MANAGED_MARKER: &str = "# kuadrat-managed: true";
 
-/// Container name kuadrat assigns to a workload.
+/// Container name kuadrat assigns to a workload. Shares the unit-file prefix, so the
+/// container, the unit file, and the systemd service all carry the same namespace.
 pub fn container_name(spec: &WorkloadSpec) -> String {
-    format!("kuadrat-{}", slug(&spec.name))
+    format!("{UNIT_PREFIX}{}", slug(&spec.name))
 }
 
 /// Render a spec to Quadlet `.container` unit text. Pure — no I/O.
-pub fn render(spec: &WorkloadSpec) -> String {
+///
+/// Validates first: a spec that would inject directives never gets rendered, so no caller
+/// can write one to disk by forgetting to check.
+pub fn render(spec: &WorkloadSpec) -> Result<String> {
+    spec.validate()?;
+
     let mut out = String::new();
 
     out.push_str(MANAGED_MARKER);
@@ -50,7 +59,7 @@ pub fn render(spec: &WorkloadSpec) -> String {
 
     out.push_str("[Install]\nWantedBy=multi-user.target\n");
 
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -62,7 +71,7 @@ mod tests {
     fn renders_minimal_spec() {
         let spec = WorkloadSpec::new("pbrain", "docker.io/library/node:22-alpine");
         let expected = include_str!("../../tests/golden/minimal.container");
-        assert_eq!(render(&spec), expected);
+        assert_eq!(render(&spec).expect("render"), expected);
     }
 
     #[test]
@@ -86,7 +95,16 @@ mod tests {
         spec.restart_policy = RestartPolicy::OnFailure;
 
         let expected = include_str!("../../tests/golden/full.container");
-        assert_eq!(render(&spec), expected);
+        assert_eq!(render(&spec).expect("render"), expected);
+    }
+
+    #[test]
+    fn render_refuses_a_spec_that_would_inject_directives() {
+        let mut spec = WorkloadSpec::new("pbrain", "alpine");
+        spec.env = vec![("X".into(), "1\nUser=root".into())];
+
+        let err = render(&spec).expect_err("render validates");
+        assert!(err.to_string().contains("line break"), "{err}");
     }
 
     #[test]
@@ -98,6 +116,6 @@ mod tests {
     #[test]
     fn rendered_unit_always_carries_the_managed_marker() {
         let spec = WorkloadSpec::new("x", "alpine");
-        assert!(render(&spec).starts_with(MANAGED_MARKER));
+        assert!(render(&spec).expect("render").starts_with(MANAGED_MARKER));
     }
 }

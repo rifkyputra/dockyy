@@ -19,7 +19,7 @@ pub async fn apply(
     paths: &Paths,
     spec: &WorkloadSpec,
 ) -> Result<()> {
-    let unit = render(spec);
+    let unit = render(spec)?;
     let path = unit_path(paths, &spec.name);
 
     ensure_owned(fsys, &path, "overwrite").await?;
