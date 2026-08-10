@@ -9,8 +9,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::deploy::{DeployStatus, Stage};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS apps (
@@ -42,6 +44,16 @@ CREATE TABLE IF NOT EXISTS events (
     at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ";
+
+/// One row of deploy history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeployRow {
+    pub id: i64,
+    pub app: String,
+    pub stage: Stage,
+    pub status: DeployStatus,
+    pub detail: Option<String>,
+}
 
 /// Durable state. Synchronous; the async engine holds it as `&Store` and each
 /// method locks the connection for its duration.
@@ -100,6 +112,122 @@ impl Store {
         .optional()
         .context("reading current spec")
     }
+
+    /// Create a new deploy for `app`, at `Detect` / `InProgress`. Returns its id.
+    pub fn create_deploy(&self, app: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute(
+            "INSERT INTO deploys (app, stage, status) VALUES (?1, ?2, ?3)",
+            params![
+                app,
+                Stage::Detect.as_str(),
+                DeployStatus::InProgress.as_str()
+            ],
+        )
+        .context("creating deploy")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Move an in-progress deploy to `stage`. Errors if it is already finished.
+    pub fn advance_stage(&self, deploy_id: i64, stage: Stage) -> Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        let n = conn
+            .execute(
+                "UPDATE deploys SET stage = ?1 WHERE id = ?2 AND status = ?3",
+                params![stage.as_str(), deploy_id, DeployStatus::InProgress.as_str()],
+            )
+            .context("advancing stage")?;
+        if n == 0 {
+            bail!("no in-progress deploy with id {deploy_id}");
+        }
+        Ok(())
+    }
+
+    /// Mark a deploy finished with a terminal status and optional detail.
+    pub fn finish_deploy(
+        &self,
+        deploy_id: i64,
+        status: DeployStatus,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        let n = conn
+            .execute(
+                "UPDATE deploys SET status = ?1, detail = ?2, finished_at = datetime('now')
+                 WHERE id = ?3",
+                params![status.as_str(), detail, deploy_id],
+            )
+            .context("finishing deploy")?;
+        if n == 0 {
+            bail!("no deploy with id {deploy_id}");
+        }
+        Ok(())
+    }
+
+    /// Read one deploy by id.
+    pub fn deploy(&self, deploy_id: i64) -> Result<Option<DeployRow>> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.query_row(
+            "SELECT id, app, stage, status, detail FROM deploys WHERE id = ?1",
+            params![deploy_id],
+            deploy_row,
+        )
+        .optional()
+        .context("reading deploy")?
+        .transpose()
+    }
+
+    /// Every deploy still in progress — the reconciliation work-list (G5).
+    pub fn in_progress_deploys(&self) -> Result<Vec<DeployRow>> {
+        let conn = self.conn.lock().expect("store lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, app, stage, status, detail FROM deploys
+                 WHERE status = ?1 ORDER BY id",
+            )
+            .context("preparing in-progress query")?;
+        let rows = stmt
+            .query_map(params![DeployStatus::InProgress.as_str()], deploy_row)
+            .context("querying in-progress deploys")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading in-progress row")??);
+        }
+        Ok(out)
+    }
+}
+
+/// Read a `(id, app, stage, status, detail)` row. The outer `rusqlite::Result`
+/// is the column read; the inner `anyhow::Result` is the enum parse.
+fn deploy_row(row: &rusqlite::Row) -> rusqlite::Result<Result<DeployRow>> {
+    Ok(build_deploy_row(
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn build_deploy_row(
+    id: i64,
+    app: String,
+    stage_s: String,
+    status_s: String,
+    detail: Option<String>,
+) -> Result<DeployRow> {
+    let stage = Stage::from_str(&stage_s)
+        .ok_or_else(|| anyhow!("deploy {id} has unknown stage {stage_s:?}"))?;
+    let status = DeployStatus::from_str(&status_s)
+        .ok_or_else(|| anyhow!("deploy {id} has unknown status {status_s:?}"))?;
+    Ok(DeployRow {
+        id,
+        app,
+        stage,
+        status,
+        detail,
+    })
 }
 
 #[cfg(test)]
@@ -179,5 +307,63 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my-app"), "message was: {msg}");
         assert!(msg.contains("collides"), "message was: {msg}");
+    }
+
+    #[test]
+    fn a_new_deploy_starts_in_progress_at_detect() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        let row = store.deploy(id).expect("get").expect("exists");
+        assert_eq!(row.app, "web");
+        assert_eq!(row.stage, Stage::Detect);
+        assert_eq!(row.status, DeployStatus::InProgress);
+    }
+
+    #[test]
+    fn advancing_moves_the_stage_forward() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store.advance_stage(id, Stage::Build).expect("advance");
+        assert_eq!(
+            store.deploy(id).expect("get").expect("row").stage,
+            Stage::Build
+        );
+    }
+
+    #[test]
+    fn advancing_a_finished_deploy_errors() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+        let err = store.advance_stage(id, Stage::Build).unwrap_err();
+        assert!(err.to_string().contains(&id.to_string()));
+    }
+
+    #[test]
+    fn finishing_records_status_and_detail() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .finish_deploy(id, DeployStatus::RolledBack, Some("healthcheck timed out"))
+            .expect("finish");
+        let row = store.deploy(id).expect("get").expect("row");
+        assert_eq!(row.status, DeployStatus::RolledBack);
+        assert_eq!(row.detail.as_deref(), Some("healthcheck timed out"));
+    }
+
+    #[test]
+    fn in_progress_lists_only_unfinished_deploys() {
+        let (_dir, store) = open_temp();
+        let a = store.create_deploy("a").expect("a");
+        let _b = store.create_deploy("b").expect("b");
+        store
+            .finish_deploy(a, DeployStatus::Done, None)
+            .expect("finish a");
+
+        let live = store.in_progress_deploys().expect("list");
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].app, "b");
     }
 }
