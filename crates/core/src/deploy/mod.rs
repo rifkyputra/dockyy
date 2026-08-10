@@ -105,6 +105,7 @@ pub struct Ctx<'a> {
 
 pub mod build;
 pub mod detect;
+pub mod health;
 
 #[cfg(test)]
 mod tests {
