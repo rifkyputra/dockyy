@@ -309,6 +309,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reapplying_an_unchanged_spec_starts_not_restarts() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fs = LocalFileSystem;
+        let fake = FakeExecutor::new();
+        fake.expect("systemctl", ok());
+
+        // First apply: new unit → start.
+        let spec = WorkloadSpec::new("pbrain", "alpine");
+        apply(&fake, &fs, &paths, &spec).await.expect("first apply");
+
+        // Second apply: identical spec → byte-identical unit → start, not restart.
+        apply(&fake, &fs, &paths, &spec)
+            .await
+            .expect("second apply");
+
+        let calls = fake.calls();
+        let restarted = calls
+            .iter()
+            .any(|(_, a)| a == &vec!["restart".to_string(), "kuadrat-pbrain".to_string()]);
+        assert!(
+            !restarted,
+            "unchanged reapply must not restart; calls: {calls:?}"
+        );
+        assert_eq!(
+            calls[3].1,
+            vec!["start".to_string(), "kuadrat-pbrain".to_string()],
+            "second apply's systemctl action must be start; calls: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn apply_never_touches_an_unprefixed_unit_of_the_same_name() {
         let dir = tempdir().expect("tempdir");
         let paths = Paths::rooted(dir.path());

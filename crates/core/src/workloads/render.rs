@@ -57,7 +57,7 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
         out.push_str(&format!("PublishPort={port}\n"));
     }
     for volume in &spec.volumes {
-        out.push_str(&format!("Volume={volume}\n"));
+        out.push_str(&format!("Volume={}\n", escape_percent(volume)));
     }
     for (key, value) in &spec.env {
         out.push_str(&format!(
@@ -189,5 +189,13 @@ mod tests {
         spec.command = Some(vec!["printf".into(), "100%".into()]);
         let unit = render(&spec).expect("render");
         assert!(unit.contains("100%%"), "unit was:\n{unit}");
+    }
+
+    #[test]
+    fn a_percent_in_a_volume_is_escaped() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.volumes = vec!["/data/50%:/x".into()];
+        let unit = render(&spec).expect("render");
+        assert!(unit.contains("Volume=/data/50%%:/x"), "unit was:\n{unit}");
     }
 }

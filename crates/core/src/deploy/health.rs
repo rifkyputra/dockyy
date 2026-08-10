@@ -14,7 +14,8 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Wait for a freshly-applied workload to be healthy. Uses the container's
 /// podman healthcheck when the spec defines one, else `systemctl is-active`.
-pub async fn healthcheck(exec: &dyn Executor, spec: &WorkloadSpec, slug: &str) -> Result<()> {
+pub async fn healthcheck(exec: &dyn Executor, spec: &WorkloadSpec) -> Result<()> {
+    let slug = spec.slug();
     let container = format!("kuadrat-{slug}");
     if spec.health_cmd.is_some() {
         poll_health(exec, &container, HEALTH_ATTEMPTS, HEALTH_INTERVAL).await
@@ -85,7 +86,7 @@ mod tests {
         let exec = FakeExecutor::new();
         exec.expect_call("podman", &["healthcheck", "run", "kuadrat-web"], out(0, ""));
 
-        healthcheck(&exec, &spec, "web").await.expect("healthy");
+        healthcheck(&exec, &spec).await.expect("healthy");
     }
 
     #[tokio::test]
@@ -108,7 +109,7 @@ mod tests {
             out(0, "active\n"),
         );
 
-        healthcheck(&exec, &spec, "worker").await.expect("active");
+        healthcheck(&exec, &spec).await.expect("active");
     }
 
     #[tokio::test]
@@ -121,7 +122,7 @@ mod tests {
             out(3, "failed\n"),
         );
 
-        let err = healthcheck(&exec, &spec, "worker").await.unwrap_err();
+        let err = healthcheck(&exec, &spec).await.unwrap_err();
         assert!(err.to_string().contains("active"), "message was: {err}");
     }
 }
