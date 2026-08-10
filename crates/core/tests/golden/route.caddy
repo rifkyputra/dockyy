@@ -1,0 +1,4 @@
+# kuadrat-managed: true
+example.com {
+	reverse_proxy localhost:3000
+}

@@ -14,6 +14,7 @@ pub const UNIT_PREFIX: &str = "kuadrat-";
 pub struct Paths {
     pub quadlet_dir: PathBuf,
     pub db_path: PathBuf,
+    pub caddy_dir: PathBuf,
 }
 
 impl Default for Paths {
@@ -21,6 +22,7 @@ impl Default for Paths {
         Self {
             quadlet_dir: PathBuf::from("/etc/containers/systemd"),
             db_path: PathBuf::from("/var/lib/kuadrat/kuadrat.db"),
+            caddy_dir: PathBuf::from("/etc/caddy/kuadrat.d"),
         }
     }
 }
@@ -31,6 +33,7 @@ impl Paths {
         Self {
             quadlet_dir: root.join("containers/systemd"),
             db_path: root.join("lib/kuadrat/kuadrat.db"),
+            caddy_dir: root.join("caddy/kuadrat.d"),
         }
     }
 }

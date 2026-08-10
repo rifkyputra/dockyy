@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod events;
 pub mod exec;
 pub mod fs;
+pub mod gateway;
 pub mod managed;
 pub mod secrets;
 pub mod spec;
