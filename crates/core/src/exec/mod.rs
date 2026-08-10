@@ -91,4 +91,69 @@ mod tests {
         let err = fake.run("systemctl", &[]).await.unwrap_err();
         assert!(err.to_string().contains("systemctl"));
     }
+
+    fn out(status: i32, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// The gap this closes: with per-program scripting only, every `systemctl`
+    /// call in a test returns the same output, so "one subcommand succeeds and
+    /// the next fails" cannot be expressed at all.
+    #[tokio::test]
+    async fn fake_executor_scripts_per_argv() {
+        let fake = FakeExecutor::new();
+        fake.expect_call("systemctl", &["daemon-reload"], out(0, ""));
+        fake.expect_call("systemctl", &["start", "web"], out(1, "start refused"));
+
+        let reload = fake
+            .run("systemctl", &["daemon-reload".to_string()])
+            .await
+            .expect("scripted");
+        assert!(reload.success());
+
+        let start = fake
+            .run("systemctl", &["start".to_string(), "web".to_string()])
+            .await
+            .expect("scripted");
+        assert!(!start.success());
+        assert_eq!(start.stderr, "start refused");
+    }
+
+    #[tokio::test]
+    async fn exact_argv_wins_over_the_program_fallback() {
+        let fake = FakeExecutor::new();
+        fake.expect("systemctl", out(0, ""));
+        fake.expect_call("systemctl", &["start", "web"], out(1, "nope"));
+
+        let stop = fake
+            .run("systemctl", &["stop".to_string(), "web".to_string()])
+            .await
+            .expect("falls back");
+        assert!(stop.success());
+
+        let start = fake
+            .run("systemctl", &["start".to_string(), "web".to_string()])
+            .await
+            .expect("exact match");
+        assert_eq!(start.stderr, "nope");
+    }
+
+    #[tokio::test]
+    async fn unexpected_call_error_names_the_argv() {
+        let fake = FakeExecutor::new();
+        fake.expect_call("systemctl", &["daemon-reload"], out(0, ""));
+
+        let err = fake
+            .run("systemctl", &["start".to_string(), "web".to_string()])
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("systemctl"), "message was: {msg}");
+        assert!(msg.contains("start"), "message was: {msg}");
+        assert!(msg.contains("web"), "message was: {msg}");
+    }
 }

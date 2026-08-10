@@ -6,10 +6,22 @@ use async_trait::async_trait;
 
 use super::{CommandOutput, Executor};
 
-/// Test double. Returns scripted output per program and records every call.
+/// Test double. Returns scripted output and records every call.
+///
+/// Two levels of scripting, checked in order:
+///
+/// 1. [`expect_call`](Self::expect_call) — matches an exact `(program, args)` pair.
+/// 2. [`expect`](Self::expect) — matches any invocation of `program`.
+///
+/// The exact form exists because nearly every call the engine makes is
+/// `systemctl <verb>`. With per-program scripting alone, every `systemctl` call
+/// in a test returns the same output, which makes "daemon-reload succeeds but
+/// start fails" — the shape every per-stage compensation test needs —
+/// impossible to express.
 #[derive(Default)]
 pub struct FakeExecutor {
-    scripted: Mutex<HashMap<String, CommandOutput>>,
+    by_call: Mutex<HashMap<(String, Vec<String>), CommandOutput>>,
+    by_program: Mutex<HashMap<String, CommandOutput>>,
     calls: Mutex<Vec<(String, Vec<String>)>>,
 }
 
@@ -18,15 +30,30 @@ impl FakeExecutor {
         Self::default()
     }
 
-    /// Script the output returned for every invocation of `program`.
+    /// Script the output returned for every invocation of `program`, whatever
+    /// its arguments. Use [`expect_call`](Self::expect_call) when a test needs
+    /// two invocations of the same program to behave differently.
     pub fn expect(&self, program: &str, output: CommandOutput) {
-        self.scripted
+        self.by_program
             .lock()
-            .expect("scripted lock")
+            .expect("by_program lock")
             .insert(program.to_string(), output);
     }
 
-    /// Every (program, args) pair seen, in order.
+    /// Script the output for one exact `(program, args)` pair. Takes precedence
+    /// over [`expect`](Self::expect).
+    pub fn expect_call(&self, program: &str, args: &[&str], output: CommandOutput) {
+        let key = (
+            program.to_string(),
+            args.iter().map(|a| a.to_string()).collect(),
+        );
+        self.by_call
+            .lock()
+            .expect("by_call lock")
+            .insert(key, output);
+    }
+
+    /// Every `(program, args)` pair seen, in order.
     pub fn calls(&self) -> Vec<(String, Vec<String>)> {
         self.calls.lock().expect("calls lock").clone()
     }
@@ -40,11 +67,22 @@ impl Executor for FakeExecutor {
             .expect("calls lock")
             .push((program.to_string(), args.to_vec()));
 
-        self.scripted
+        let key = (program.to_string(), args.to_vec());
+        if let Some(output) = self
+            .by_call
             .lock()
-            .expect("scripted lock")
+            .expect("by_call lock")
+            .get(&key)
+            .cloned()
+        {
+            return Ok(output);
+        }
+
+        self.by_program
+            .lock()
+            .expect("by_program lock")
             .get(program)
             .cloned()
-            .ok_or_else(|| anyhow!("unexpected command: {program}"))
+            .ok_or_else(|| anyhow!("unexpected command: {program} {}", args.join(" ")))
     }
 }

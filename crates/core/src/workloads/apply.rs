@@ -128,6 +128,44 @@ mod tests {
         );
     }
 
+    /// Previously inexpressible: with per-program scripting, `daemon-reload` and
+    /// `start` shared one scripted result, so a test could not make the first
+    /// succeed and the second fail. This is the shape phase 2's per-stage
+    /// compensation tests are built on.
+    #[tokio::test]
+    async fn apply_fails_at_start_after_a_successful_reload() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fs = LocalFileSystem;
+        let fake = FakeExecutor::new();
+        fake.expect_call("systemctl", &["daemon-reload"], ok());
+        fake.expect_call(
+            "systemctl",
+            &["start", "kuadrat-pbrain"],
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "job failed".into(),
+            },
+        );
+
+        let spec = WorkloadSpec::new("pbrain", "alpine");
+        let err = apply(&fake, &fs, &paths, &spec).await.unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("start"), "message was: {msg}");
+        assert!(msg.contains("job failed"), "message was: {msg}");
+
+        // The reload ran and succeeded; only the start failed.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, vec!["daemon-reload".to_string()]);
+
+        // Phase-2 note: the unit file is left on disk. Compensation is the
+        // deploy state machine's job, not apply's — see docs/known-gaps.md.
+        assert!(unit_path(&paths, "pbrain").exists());
+    }
+
     #[tokio::test]
     async fn apply_is_idempotent_for_the_same_spec() {
         let dir = tempdir().expect("tempdir");

@@ -23,11 +23,12 @@ sudo bash scripts/acceptance.sh
 
 ## Before phase 2 starts
 
-**`FakeExecutor` scripts output per program, not per argv** (`exec/fake.rs`). Nearly every core call
-is `systemctl <verb>`, so all systemctl calls in a test return identical output. This makes
-"daemon-reload succeeds but start fails" **inexpressible** — exactly the shape of the per-stage
-compensation tests the design calls "the most important layer." Add argv-aware scripting or a
-call-sequence queue *before* writing the deploy state machine, not during.
+~~**`FakeExecutor` scripts output per program, not per argv.**~~ **Closed 2026-08-10.**
+`FakeExecutor::expect_call(program, args, output)` matches an exact `(program, args)` pair and takes
+precedence over the program-wide `expect()`, which still works — so existing tests were untouched.
+`apply_fails_at_start_after_a_successful_reload` (`workloads/apply.rs`) is the previously
+inexpressible case, now covered: the reload succeeds, the start fails, and the test asserts on both
+the error and the call sequence. Phase 2's per-stage compensation tests can be written directly.
 
 **`apply()` writes the unit before `daemon-reload` succeeds**, so a failed reload leaves an orphan
 file. Acceptable today because units are derived artifacts and the ownership guard means the next
