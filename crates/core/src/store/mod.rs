@@ -9,8 +9,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
-use rusqlite::Connection;
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS apps (
@@ -46,10 +46,6 @@ CREATE TABLE IF NOT EXISTS events (
 /// Durable state. Synchronous; the async engine holds it as `&Store` and each
 /// method locks the connection for its duration.
 pub struct Store {
-    // Read only by tests today; Tasks 4-7 add the methods that use it for
-    // real. `#[allow(dead_code)]` avoids a clippy `-D warnings` failure on
-    // the non-test build in the meantime.
-    #[allow(dead_code)]
     conn: Mutex<Connection>,
 }
 
@@ -67,6 +63,42 @@ impl Store {
         Ok(Store {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Upsert the current spec for `name`. `slug` must be unique across apps;
+    /// a collision with a different app is rejected with a clear error.
+    /// `spec_json` is stored verbatim and never parsed.
+    pub fn put_spec(&self, name: &str, slug: &str, spec_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute(
+            "INSERT INTO apps (name, slug, spec_json, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(name) DO UPDATE SET
+               slug = excluded.slug,
+               spec_json = excluded.spec_json,
+               updated_at = datetime('now')",
+            params![name, slug, spec_json],
+        )
+        .map_err(|e| {
+            if e.to_string().contains("apps.slug") {
+                anyhow!("slug {slug:?} for app {name:?} collides with an existing app")
+            } else {
+                anyhow::Error::from(e).context("storing spec")
+            }
+        })?;
+        Ok(())
+    }
+
+    /// The current spec JSON for `name`, or `None`.
+    pub fn current_spec(&self, name: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.query_row(
+            "SELECT spec_json FROM apps WHERE name = ?1",
+            params![name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("reading current spec")
     }
 }
 
@@ -102,5 +134,50 @@ mod tests {
             )
             .expect("query");
         assert_eq!(count, 4, "all four tables should exist");
+    }
+
+    fn open_temp() -> (tempfile::TempDir, Store) {
+        let dir = tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("k.db")).expect("open");
+        (dir, store)
+    }
+
+    #[test]
+    fn spec_round_trips() {
+        let (_dir, store) = open_temp();
+        store
+            .put_spec("web", "web", r#"{"name":"web"}"#)
+            .expect("put");
+        assert_eq!(
+            store.current_spec("web").expect("get").as_deref(),
+            Some(r#"{"name":"web"}"#)
+        );
+    }
+
+    #[test]
+    fn current_spec_is_none_for_an_unknown_app() {
+        let (_dir, store) = open_temp();
+        assert_eq!(store.current_spec("ghost").expect("get"), None);
+    }
+
+    #[test]
+    fn re_putting_the_same_app_updates_it() {
+        let (_dir, store) = open_temp();
+        store.put_spec("web", "web", r#"{"v":1}"#).expect("put1");
+        store.put_spec("web", "web", r#"{"v":2}"#).expect("put2");
+        assert_eq!(
+            store.current_spec("web").expect("get").as_deref(),
+            Some(r#"{"v":2}"#)
+        );
+    }
+
+    #[test]
+    fn a_colliding_slug_from_a_different_app_is_rejected() {
+        let (_dir, store) = open_temp();
+        store.put_spec("My App", "my-app", "{}").expect("first");
+        let err = store.put_spec("my_app", "my-app", "{}").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("my-app"), "message was: {msg}");
+        assert!(msg.contains("collides"), "message was: {msg}");
     }
 }
