@@ -13,6 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::deploy::{DeployStatus, Stage};
+use crate::events::{Event, EventStatus};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS apps (
@@ -223,6 +224,42 @@ impl Store {
             .context("releasing lock")?;
         Ok(())
     }
+
+    /// Append one event to a deploy's timeline.
+    pub fn append_event(&self, event: &Event) -> Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute(
+            "INSERT INTO events (deploy_id, stage, status, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                event.deploy_id,
+                event.stage.as_str(),
+                event.status.as_str(),
+                event.detail
+            ],
+        )
+        .context("appending event")?;
+        Ok(())
+    }
+
+    /// All events for a deploy, in insertion order.
+    pub fn events_for(&self, deploy_id: i64) -> Result<Vec<Event>> {
+        let conn = self.conn.lock().expect("store lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT deploy_id, stage, status, detail FROM events
+                 WHERE deploy_id = ?1 ORDER BY id",
+            )
+            .context("preparing events query")?;
+        let rows = stmt
+            .query_map(params![deploy_id], event_row)
+            .context("querying events")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading event row")??);
+        }
+        Ok(out)
+    }
 }
 
 /// Read a `(id, app, stage, status, detail)` row. The outer `rusqlite::Result`
@@ -251,6 +288,34 @@ fn build_deploy_row(
     Ok(DeployRow {
         id,
         app,
+        stage,
+        status,
+        detail,
+    })
+}
+
+/// Read an `(deploy_id, stage, status, detail)` event row.
+fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
+    Ok(build_event(
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+    ))
+}
+
+fn build_event(
+    deploy_id: i64,
+    stage_s: String,
+    status_s: String,
+    detail: Option<String>,
+) -> Result<Event> {
+    let stage = Stage::from_str(&stage_s)
+        .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown stage {stage_s:?}"))?;
+    let status = EventStatus::from_str(&status_s)
+        .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}"))?;
+    Ok(Event {
+        deploy_id,
         stage,
         status,
         detail,
@@ -427,5 +492,53 @@ mod tests {
     fn releasing_an_unheld_lock_is_ok() {
         let (_dir, store) = open_temp();
         store.release_lock("never-held").expect("no error");
+    }
+
+    #[test]
+    fn events_append_and_read_back_in_order() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+
+        store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Detect,
+                status: EventStatus::Started,
+                detail: None,
+            })
+            .expect("first");
+        store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Build,
+                status: EventStatus::Failed,
+                detail: Some("build broke".into()),
+            })
+            .expect("second");
+
+        let events = store.events_for(id).expect("read");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].stage, Stage::Detect);
+        assert_eq!(events[0].status, EventStatus::Started);
+        assert_eq!(events[1].stage, Stage::Build);
+        assert_eq!(events[1].detail.as_deref(), Some("build broke"));
+    }
+
+    #[test]
+    fn events_are_scoped_to_their_deploy() {
+        let (_dir, store) = open_temp();
+        let a = store.create_deploy("a").expect("a");
+        let b = store.create_deploy("b").expect("b");
+        store
+            .append_event(&Event {
+                deploy_id: a,
+                stage: Stage::Detect,
+                status: EventStatus::Started,
+                detail: None,
+            })
+            .expect("append a");
+
+        assert_eq!(store.events_for(a).expect("a").len(), 1);
+        assert_eq!(store.events_for(b).expect("b").len(), 0);
     }
 }
