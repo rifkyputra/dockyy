@@ -1,9 +1,8 @@
-use std::path::Path;
-
 use anyhow::{bail, Result};
 
 use crate::exec::Executor;
 use crate::fs::FileSystem;
+use crate::managed::ensure_owned;
 use crate::spec::WorkloadSpec;
 use crate::workloads::render::{render, MANAGED_MARKER};
 
@@ -22,7 +21,7 @@ pub async fn apply(
     let unit = render(spec)?;
     let path = unit_path(paths, &spec.name);
 
-    ensure_owned(fsys, &path, "overwrite").await?;
+    ensure_owned(fsys, &path, MANAGED_MARKER, "overwrite").await?;
 
     fsys.create_dir_all(&paths.quadlet_dir).await?;
     fsys.write(&path, &unit).await?;
@@ -44,7 +43,7 @@ pub async fn remove(
 ) -> Result<()> {
     let path = unit_path(paths, name);
 
-    if !ensure_owned(fsys, &path, "remove").await? {
+    if !ensure_owned(fsys, &path, MANAGED_MARKER, "remove").await? {
         return Ok(());
     }
 
@@ -53,29 +52,6 @@ pub async fn remove(
     systemctl(exec, &["daemon-reload".to_string()]).await?;
 
     Ok(())
-}
-
-/// `Ok(true)` when the unit exists and carries kuadrat's marker, `Ok(false)` when it is
-/// absent, and an error when a file is there that kuadrat did not write.
-///
-/// This is the one ownership rule; `apply`, `remove`, and `list` all defer to the marker
-/// rather than each deciding for itself. The design says drift is reported, never silently
-/// overwritten — this is where that is enforced.
-async fn ensure_owned(fsys: &dyn FileSystem, path: &Path, action: &str) -> Result<bool> {
-    if !fsys.exists(path).await? {
-        return Ok(false);
-    }
-
-    let existing = fsys.read_to_string(path).await?;
-    if !existing.starts_with(MANAGED_MARKER) {
-        bail!(
-            "refusing to {action} {}: the file exists but does not start with `{MANAGED_MARKER}`, \
-             so kuadrat did not write it; resolve the drift by hand",
-            path.display()
-        );
-    }
-
-    Ok(true)
 }
 
 async fn systemctl(exec: &dyn Executor, args: &[String]) -> Result<()> {
