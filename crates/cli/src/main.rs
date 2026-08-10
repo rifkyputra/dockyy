@@ -70,11 +70,14 @@ async fn main() -> Result<()> {
             use kuadrat_core::deploy::{build::build, detect::detect};
             use kuadrat_core::spec::slug;
 
-            let name = path
+            let abs = path
+                .canonicalize()
+                .with_context(|| format!("no such path: {}", path.display()))?;
+            let name = abs
                 .file_name()
                 .and_then(|n| n.to_str())
                 .context("path has no final component to name the app after")?;
-            let plan = detect(&exec, &fsys, &path).await?;
+            let plan = detect(&exec, &fsys, &abs).await?;
             let image = build(&exec, &plan, &slug(name)).await?;
             println!("{image}");
         }

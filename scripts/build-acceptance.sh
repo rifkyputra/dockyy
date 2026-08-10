@@ -7,6 +7,7 @@ set -uo pipefail
 
 BIN=/home/kyy/devbox/kuadrat/target/release/kuadrat
 WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 APP=g2demo
 SLUG=g2demo
 IMAGE="localhost/kuadrat-${SLUG}"
@@ -41,6 +42,12 @@ echo "$OUT"
 
 echo "== podman sees the image"
 podman image exists "${IMAGE}:${SHA}" && ok "image ${IMAGE}:${SHA} exists" || bad "image not found"
+
+echo "== build with a relative '.' path"
+OUT2=$( cd "$WORK/$APP" && "$BIN" build . 2>&1 ); rc2=$?
+echo "$OUT2"
+[ $rc2 -eq 0 ] && ok "build . exited 0" || bad "build . exited $rc2"
+[ "$OUT2" = "${IMAGE}:${SHA}" ] && ok "build . printed reference matches localhost/kuadrat-<slug>:<sha>" || bad "build . reference was '$OUT2', expected '${IMAGE}:${SHA}'"
 
 echo "== detect rejects a non-repo"
 mkdir -p "$WORK/norepo"

@@ -59,10 +59,18 @@ pub async fn detect(
         );
     }
 
+    let commit = out.stdout.trim().to_string();
+    if commit.is_empty() {
+        bail!(
+            "git rev-parse HEAD returned no commit for {}",
+            context_dir.display()
+        );
+    }
+
     Ok(BuildPlan {
         containerfile,
         context_dir: context_dir.to_path_buf(),
-        commit: out.stdout.trim().to_string(),
+        commit,
     })
 }
 
@@ -147,6 +155,29 @@ mod tests {
         assert!(
             err.to_string().contains("git repository"),
             "message was: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_an_empty_commit() {
+        let fsys = FakeFileSystem::new();
+        fsys.insert("/repo/Containerfile", "FROM alpine\n");
+        let exec = FakeExecutor::new();
+        exec.expect_call(
+            "git",
+            &["-C", "/repo", "rev-parse", "HEAD"],
+            CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let err = detect(&exec, &fsys, Path::new("/repo")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("commit") || msg.contains("rev-parse"),
+            "message was: {msg}"
         );
     }
 }

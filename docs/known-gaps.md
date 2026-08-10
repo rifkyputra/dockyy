@@ -35,6 +35,15 @@ file. Acceptable today because units are derived artifacts and the ownership gua
 apply overwrites it — but the deploy state machine's per-stage compensation must handle it, and
 should be built on the same ownership check rather than a second one.
 
+## Before G4
+
+- **`render` does not know the built image reference.** It emits `Image={spec.image}` straight
+  from the spec's free-form `image` field; it never calls `image_reference`. So G4's Apply stage
+  must set `spec.image = image_reference(slug, plan.commit)` itself, and must derive the spec's
+  name/slug from the same identity the build used — otherwise the image tag and the container
+  namespace can drift apart. Recorded here so G4 does not assume `render` already knows the built
+  reference.
+
 ## Injection family (same root as C2)
 
 `WorkloadSpec::validate()` rejects `\n` and `\r` in every rendered field, closing directive

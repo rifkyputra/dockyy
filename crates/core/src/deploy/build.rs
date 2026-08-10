@@ -35,10 +35,11 @@ pub async fn build(exec: &dyn Executor, plan: &BuildPlan, slug: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::detect::BuildPlan;
+    use crate::deploy::detect::{detect, BuildPlan};
     use crate::exec::fake::FakeExecutor;
     use crate::exec::CommandOutput;
-    use std::path::PathBuf;
+    use crate::fs::fake::FakeFileSystem;
+    use std::path::{Path, PathBuf};
 
     fn plan() -> BuildPlan {
         BuildPlan {
@@ -108,5 +109,41 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("build"), "message was: {msg}");
         assert!(msg.contains("build step failed"), "message was: {msg}");
+    }
+
+    #[tokio::test]
+    async fn detect_then_build_produces_the_expected_image_reference() {
+        let fsys = FakeFileSystem::new();
+        fsys.insert("/repo/Containerfile", "FROM alpine\n");
+        let exec = FakeExecutor::new();
+        exec.expect_call(
+            "git",
+            &["-C", "/repo", "rev-parse", "HEAD"],
+            CommandOutput {
+                status: 0,
+                stdout: "abc123\n".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let plan = detect(&exec, &fsys, Path::new("/repo"))
+            .await
+            .expect("detect");
+
+        exec.expect_call(
+            "podman",
+            &[
+                "build",
+                "-t",
+                "localhost/kuadrat-web:abc123",
+                "-f",
+                "/repo/Containerfile",
+                "/repo",
+            ],
+            ok(),
+        );
+
+        let image = build(&exec, &plan, "web").await.expect("build");
+        assert_eq!(image, "localhost/kuadrat-web:abc123");
     }
 }
