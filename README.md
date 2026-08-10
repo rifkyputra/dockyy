@@ -57,8 +57,12 @@ notification delivery, metrics, backups, autonomous agent action.
 
 ## Requirements
 
-Podman 5+, systemd with cgroups v2, Caddy. The daemon binds a unix socket and loopback only —
-reaching the UI from elsewhere is the operator's job via SSH tunnel or VPN.
+**Podman 4.4+** (when Quadlet landed), systemd with **cgroups v2**, and Caddy. Validated on
+Podman 4.9.3 / Ubuntu 24.04. Podman 6 removed cgroups v1, CNI, `slirp4netns`, and BoltDB — kuadrat
+targets the modern stack, so hosts still on cgroups v1 defaults are unsupported.
+
+The daemon binds a unix socket and loopback only — reaching the UI from elsewhere is the operator's
+job via SSH tunnel or VPN.
 
 ## Documentation
 

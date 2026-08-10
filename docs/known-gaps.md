@@ -3,23 +3,22 @@
 Carried forward from the phase-1 whole-branch review and its fix wave. Each entry is real, judged
 deferrable at the time, and worth re-reading before the phase it names.
 
-## Open acceptance
+## Acceptance — PASSED 2026-08-10
 
-**Phase 1's done criterion is formally unmet.** The plan's Task 7 Step 4 — apply a spec on a real
-host, confirm the container runs under systemd, then remove it — was never run, because `podman`
-is not installed on the development host. Everything below it passed: 41 tests, `make check` clean,
-and a temp-root run proving spec parsing, validation, rendering, and the file write.
+Phase 1's done criterion is met. `scripts/acceptance.sh` ran on a real host (Ubuntu 24.04.4,
+Podman 4.9.3, cgroups v2) and passed 16/16: apply wrote a correct unit, systemd reported it active,
+podman showed the container, `list`/`status` agreed with reality, and remove cleaned up both.
 
-Two of the Critical findings the whole-branch review caught (C1 unit-file ownership, I1 `Exec=`
-quoting) are precisely the class of bug that step would have surfaced first. Run it before trusting
-phase 1 on anything real:
+It also regression-tested the two Critical findings against a real host, which is where they would
+actually bite: **C1** — kuadrat refused both to overwrite and to delete a planted foreign
+`.container` file; **C2** — a spec with `1\nUser=root` in an env value was rejected rather than
+rendered; **I1** — `sh -c "echo …; sleep 3600"` rendered as one quoted argument, not four.
+
+Re-run it after any change to rendering, paths, or the ownership guard:
 
 ```bash
-sudo kuadrat apply /path/to/spec.json
-sudo systemctl status kuadrat-<slug>
-sudo podman ps --filter name=kuadrat-<slug>
-kuadrat list && kuadrat status <name>
-sudo kuadrat remove <name>
+cd ~/devbox/kuadrat && PATH=$HOME/.cargo/bin:$PATH cargo build --release
+sudo bash scripts/acceptance.sh
 ```
 
 ## Before phase 2 starts
