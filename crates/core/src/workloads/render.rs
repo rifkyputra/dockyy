@@ -12,6 +12,11 @@ pub fn container_name(spec: &WorkloadSpec) -> String {
     format!("{UNIT_PREFIX}{}", slug(&spec.name))
 }
 
+/// Escape a literal `%` so systemd/Quadlet does not treat it as a specifier.
+fn escape_percent(s: &str) -> String {
+    s.replace('%', "%%")
+}
+
 /// Quote one `Exec=` argument per systemd's exec syntax.
 ///
 /// systemd splits `Exec=` on whitespace, so an argument containing a space becomes two
@@ -55,7 +60,11 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
         out.push_str(&format!("Volume={volume}\n"));
     }
     for (key, value) in &spec.env {
-        out.push_str(&format!("Environment={key}={value}\n"));
+        out.push_str(&format!(
+            "Environment={}={}\n",
+            escape_percent(key),
+            escape_percent(value)
+        ));
     }
     for secret in &spec.secrets {
         out.push_str(&format!("Secret={secret}\n"));
@@ -64,7 +73,10 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
         out.push_str(&format!("HealthCmd={health}\n"));
     }
     if let Some(command) = &spec.command {
-        let argv: Vec<String> = command.iter().map(|a| quote_exec_arg(a)).collect();
+        let argv: Vec<String> = command
+            .iter()
+            .map(|a| quote_exec_arg(&escape_percent(a)))
+            .collect();
         out.push_str(&format!("Exec={}\n", argv.join(" ")));
     }
     out.push('\n');
@@ -161,5 +173,21 @@ mod tests {
     fn rendered_unit_always_carries_the_managed_marker() {
         let spec = WorkloadSpec::new("x", "alpine");
         assert!(render(&spec).expect("render").starts_with(MANAGED_MARKER));
+    }
+
+    #[test]
+    fn a_percent_in_an_env_value_is_escaped() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.env = vec![("PW".into(), "a%b".into())];
+        let unit = render(&spec).expect("render");
+        assert!(unit.contains("Environment=PW=a%%b"), "unit was:\n{unit}");
+    }
+
+    #[test]
+    fn a_percent_in_an_exec_arg_is_escaped() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.command = Some(vec!["printf".into(), "100%".into()]);
+        let unit = render(&spec).expect("render");
+        assert!(unit.contains("100%%"), "unit was:\n{unit}");
     }
 }
