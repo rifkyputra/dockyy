@@ -10,4 +10,5 @@ pub mod events;
 pub mod exec;
 pub mod fs;
 pub mod spec;
+pub mod store;
 pub mod workloads;

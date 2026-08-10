@@ -73,6 +73,12 @@ The invariant, stated so violations are obvious in review:
   1. `tokio::process::Command` appears only in `exec::local`.
   2. `tokio::fs` appears only in `fs::local` — and neither does `std::fs`, nor
      `Path::exists()`, which is the same violation wearing a different name.
+  3. **Exception — the store.** `store` opens its own SQLite file with
+     `rusqlite::Connection::open` and creates the containing directory with
+     `std::fs::create_dir_all`. This is not a host side effect: the database is
+     kuadrat's own state, which stays wherever kuadrat runs, not on the managed
+     host a remote executor would reach. It is the one sanctioned direct
+     filesystem touch outside `fs::local`.
 
   Outside `kuadrat-core` the rule does not apply: the CLI reading a spec file off the
   operator's own disk is not a host interaction.
