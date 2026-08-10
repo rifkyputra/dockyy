@@ -13,12 +13,14 @@ pub const UNIT_PREFIX: &str = "kuadrat-";
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub quadlet_dir: PathBuf,
+    pub db_path: PathBuf,
 }
 
 impl Default for Paths {
     fn default() -> Self {
         Self {
             quadlet_dir: PathBuf::from("/etc/containers/systemd"),
+            db_path: PathBuf::from("/var/lib/kuadrat/kuadrat.db"),
         }
     }
 }
@@ -28,6 +30,7 @@ impl Paths {
     pub fn rooted(root: &Path) -> Self {
         Self {
             quadlet_dir: root.join("containers/systemd"),
+            db_path: root.join("lib/kuadrat/kuadrat.db"),
         }
     }
 }
@@ -69,5 +72,23 @@ mod tests {
         assert_eq!(spec_name_from_stem("kuadrat-alpha"), Some("alpha"));
         assert_eq!(spec_name_from_stem("nginx"), None);
         assert_eq!(spec_name_from_stem("kuadrat-"), None);
+    }
+
+    #[test]
+    fn db_path_default_is_under_var_lib() {
+        let paths = Paths::default();
+        assert_eq!(
+            paths.db_path,
+            std::path::PathBuf::from("/var/lib/kuadrat/kuadrat.db")
+        );
+    }
+
+    #[test]
+    fn db_path_is_rerooted_for_tests() {
+        let paths = Paths::rooted(std::path::Path::new("/tmp/kx"));
+        assert_eq!(
+            paths.db_path,
+            std::path::PathBuf::from("/tmp/kx/lib/kuadrat/kuadrat.db")
+        );
     }
 }
