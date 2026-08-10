@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod events;
 pub mod exec;
 pub mod fs;
+pub mod secrets;
 pub mod spec;
 pub mod store;
 pub mod workloads;
