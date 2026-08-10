@@ -10,13 +10,23 @@ use crate::exec::Executor;
 /// Create or replace a secret. The value is piped to podman; it never appears
 /// in argv. Errors name the secret and echo podman's stderr, never the value.
 pub async fn set(exec: &dyn Executor, name: &str, value: &str) -> Result<()> {
+    // podman 4.9.3's `secret create --replace` is broken for a secret that
+    // does not yet exist (it errors trying to delete the nonexistent old
+    // one), so upsert as remove-then-create instead of relying on --replace.
+    // The remove is best-effort: the secret may not exist yet, so its result
+    // is ignored.
+    let _ = exec
+        .run(
+            "podman",
+            &["secret".to_string(), "rm".to_string(), name.to_string()],
+        )
+        .await;
     let out = exec
         .run_with_stdin(
             "podman",
             &[
                 "secret".to_string(),
                 "create".to_string(),
-                "--replace".to_string(),
                 name.to_string(),
                 "-".to_string(),
             ],
@@ -102,11 +112,8 @@ mod tests {
     #[tokio::test]
     async fn set_passes_the_value_by_stdin_never_argv() {
         let exec = FakeExecutor::new();
-        exec.expect_call(
-            "podman",
-            &["secret", "create", "--replace", "db-pw", "-"],
-            ok(""),
-        );
+        exec.expect_call("podman", &["secret", "rm", "db-pw"], ok(""));
+        exec.expect_call("podman", &["secret", "create", "db-pw", "-"], ok(""));
 
         set(&exec, "db-pw", "supersecret").await.expect("set");
 
@@ -123,13 +130,14 @@ mod tests {
     #[tokio::test]
     async fn set_fails_without_echoing_the_value() {
         let exec = FakeExecutor::new();
+        exec.expect_call("podman", &["secret", "rm", "db-pw"], ok(""));
         exec.expect_call(
             "podman",
-            &["secret", "create", "--replace", "db-pw", "-"],
+            &["secret", "create", "db-pw", "-"],
             CommandOutput {
                 status: 125,
                 stdout: String::new(),
-                stderr: "already in use".into(),
+                stderr: "disk full".into(),
             },
         );
         let err = set(&exec, "db-pw", "supersecret").await.unwrap_err();

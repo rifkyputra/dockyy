@@ -35,6 +35,16 @@ file. Acceptable today because units are derived artifacts and the ownership gua
 apply overwrites it — but the deploy state machine's per-stage compensation must handle it, and
 should be built on the same ownership check rather than a second one.
 
+## G3 — secrets
+
+- **`secrets::set` upserts via remove-then-create, not an atomic replace.** podman 4.9.3's
+  `secret create --replace NAME -` is broken for a not-yet-existing secret (it errors trying to
+  delete a nonexistent old one), so `set` does a best-effort `podman secret rm` followed by
+  `podman secret create`. There is a brief window between the two where the secret is absent.
+  Acceptable for a single-host tool: a container reads its mounted secret at start, not while
+  `kuadrat secret set` is running, so the window does not race a live read. Revisit if kuadrat
+  ever needs to rotate a secret under a running container without a restart.
+
 ## Before G4
 
 - **`render` does not know the built image reference.** It emits `Image={spec.image}` straight
