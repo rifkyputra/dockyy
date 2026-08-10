@@ -71,6 +71,7 @@ impl DeployStatus {
     }
 }
 
+pub mod build;
 pub mod detect;
 
 #[cfg(test)]
