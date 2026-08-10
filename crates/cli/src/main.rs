@@ -33,6 +33,21 @@ enum Command {
     List,
     /// Build a repo's image without deploying it
     Build { path: std::path::PathBuf },
+    /// Manage podman secrets (values read from stdin, never argv)
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretAction {
+    /// Create or replace a secret; the value is read verbatim from stdin
+    Set { name: String },
+    /// List secret names
+    Ls,
+    /// Remove a secret
+    Rm { name: String },
 }
 
 #[tokio::main]
@@ -80,6 +95,29 @@ async fn main() -> Result<()> {
             let plan = detect(&exec, &fsys, &abs).await?;
             let image = build(&exec, &plan, &slug(name)).await?;
             println!("{image}");
+        }
+        Command::Secret { action } => {
+            use kuadrat_core::secrets;
+            match action {
+                SecretAction::Set { name } => {
+                    use std::io::Read;
+                    let mut value = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut value)
+                        .context("reading the secret value from stdin")?;
+                    secrets::set(&exec, &name, &value).await?;
+                    println!("set secret {name}");
+                }
+                SecretAction::Ls => {
+                    for n in secrets::list(&exec).await? {
+                        println!("{n}");
+                    }
+                }
+                SecretAction::Rm { name } => {
+                    secrets::remove(&exec, &name).await?;
+                    println!("removed secret {name}");
+                }
+            }
         }
     }
 
