@@ -23,11 +23,23 @@ pub async fn apply(
 
     ensure_owned(fsys, &path, MANAGED_MARKER, "overwrite").await?;
 
+    let previous = if fsys.exists(&path).await? {
+        Some(fsys.read_to_string(&path).await?)
+    } else {
+        None
+    };
+
     fsys.create_dir_all(&paths.quadlet_dir).await?;
     fsys.write(&path, &unit).await?;
 
     systemctl(exec, &["daemon-reload".to_string()]).await?;
-    systemctl(exec, &["start".to_string(), unit_name(&spec.name)]).await?;
+
+    // A new or byte-identical unit only needs `start` (a no-op if already
+    // running). A changed unit needs `restart`, or the old container keeps
+    // running behind the new unit file.
+    let changed = matches!(&previous, Some(p) if p != &unit);
+    let action = if changed { "restart" } else { "start" };
+    systemctl(exec, &[action.to_string(), unit_name(&spec.name)]).await?;
 
     Ok(())
 }
@@ -265,6 +277,35 @@ mod tests {
         assert!(fs.contents(unit_path(&paths, "nginx")).is_some());
         // Critically: no `systemctl stop nginx` against the host's real nginx.
         assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn redeploying_a_changed_spec_restarts_not_starts() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fs = LocalFileSystem;
+        let fake = FakeExecutor::new();
+        fake.expect("systemctl", ok());
+
+        // First apply: new unit → start.
+        let mut spec = WorkloadSpec::new("pbrain", "alpine");
+        apply(&fake, &fs, &paths, &spec).await.expect("first apply");
+
+        // Second apply: different image → the unit content changes → restart.
+        spec.image = "alpine:3.20".to_string();
+        apply(&fake, &fs, &paths, &spec)
+            .await
+            .expect("second apply");
+
+        let calls = fake.calls();
+        // The final systemctl action must be a restart of the changed unit.
+        let restarted = calls
+            .iter()
+            .any(|(_, a)| a == &vec!["restart".to_string(), "kuadrat-pbrain".to_string()]);
+        assert!(
+            restarted,
+            "expected a restart of the changed unit; calls: {calls:?}"
+        );
     }
 
     #[tokio::test]
