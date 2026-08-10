@@ -196,6 +196,33 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Try to take the per-app lock. `true` if acquired, `false` if already
+    /// held. The lock row is durable — a crash leaves it held, and G5's
+    /// reconciliation releases it.
+    pub fn acquire_lock(&self, app: &str, deploy_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store lock");
+        match conn.execute(
+            "INSERT INTO locks (app, deploy_id) VALUES (?1, ?2)",
+            params![app, deploy_id],
+        ) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::SqliteFailure(f, _))
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(anyhow::Error::from(e).context("acquiring lock")),
+        }
+    }
+
+    /// Release the per-app lock. Idempotent — releasing an unheld lock is fine.
+    pub fn release_lock(&self, app: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute("DELETE FROM locks WHERE app = ?1", params![app])
+            .context("releasing lock")?;
+        Ok(())
+    }
 }
 
 /// Read a `(id, app, stage, status, detail)` row. The outer `rusqlite::Result`
@@ -365,5 +392,40 @@ mod tests {
         let live = store.in_progress_deploys().expect("list");
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].app, "b");
+    }
+
+    #[test]
+    fn a_lock_is_held_until_released() {
+        let (_dir, store) = open_temp();
+        assert!(
+            store.acquire_lock("web", 1).expect("first"),
+            "first acquire succeeds"
+        );
+        assert!(
+            !store.acquire_lock("web", 2).expect("second"),
+            "second acquire is refused"
+        );
+
+        store.release_lock("web").expect("release");
+        assert!(
+            store.acquire_lock("web", 3).expect("third"),
+            "acquire after release succeeds"
+        );
+    }
+
+    #[test]
+    fn locks_are_per_app() {
+        let (_dir, store) = open_temp();
+        assert!(store.acquire_lock("a", 1).expect("a"));
+        assert!(
+            store.acquire_lock("b", 2).expect("b"),
+            "a different app is not blocked"
+        );
+    }
+
+    #[test]
+    fn releasing_an_unheld_lock_is_ok() {
+        let (_dir, store) = open_temp();
+        store.release_lock("never-held").expect("no error");
     }
 }
