@@ -15,6 +15,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::deploy::{DeployStatus, Stage};
 use crate::events::{Event, EventStatus};
 
+// Inter-table references (deploys.app, events.deploy_id, locks.deploy_id) are
+// unenforced by design in G1 — SQLite needs PRAGMA foreign_keys and explicit
+// FK declarations, and nothing here deletes rows.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS apps (
     name       TEXT PRIMARY KEY,
@@ -92,12 +95,13 @@ impl Store {
                updated_at = datetime('now')",
             params![name, slug, spec_json],
         )
-        .map_err(|e| {
-            if e.to_string().contains("apps.slug") {
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
                 anyhow!("slug {slug:?} for app {name:?} collides with an existing app")
-            } else {
-                anyhow::Error::from(e).context("storing spec")
             }
+            other => anyhow::Error::from(other).context("storing spec"),
         })?;
         Ok(())
     }
@@ -540,5 +544,40 @@ mod tests {
 
         assert_eq!(store.events_for(a).expect("a").len(), 1);
         assert_eq!(store.events_for(b).expect("b").len(), 0);
+    }
+
+    #[test]
+    fn a_spec_a_deploy_and_a_held_lock_survive_a_reopen() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("persist.db");
+
+        let store = Store::open(&db).expect("open");
+        store
+            .put_spec("web", "web", r#"{"v":1}"#)
+            .expect("put spec");
+        let id = store.create_deploy("web").expect("create deploy");
+        assert!(
+            store.acquire_lock("web", id).expect("acquire lock"),
+            "lock should be free on first acquire"
+        );
+        drop(store);
+
+        // Reopen the same path as a fresh Store, as a restarted process would.
+        let reopened = Store::open(&db).expect("reopen");
+        assert_eq!(
+            reopened.current_spec("web").expect("get spec").as_deref(),
+            Some(r#"{"v":1}"#),
+            "spec should survive the reopen"
+        );
+        let row = reopened
+            .deploy(id)
+            .expect("get deploy")
+            .expect("deploy row should exist after reopen");
+        assert_eq!(row.app, "web");
+        assert_eq!(row.id, id);
+        assert!(
+            !reopened.acquire_lock("web", 999).expect("acquire attempt"),
+            "the lock acquired before the reopen should still be held"
+        );
     }
 }
