@@ -71,6 +71,8 @@ impl DeployStatus {
     }
 }
 
+pub mod detect;
+
 #[cfg(test)]
 mod tests {
     use super::*;
