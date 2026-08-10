@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use kuadrat_core::exec::local::LocalExecutor;
+use kuadrat_core::fs::local::LocalFileSystem;
 use kuadrat_core::spec::WorkloadSpec;
 use kuadrat_core::workloads::apply::{apply, remove, Paths};
 use kuadrat_core::workloads::query::{list, status};
@@ -40,25 +41,26 @@ async fn main() -> Result<()> {
         None => Paths::default(),
     };
     let exec = LocalExecutor;
+    let fsys = LocalFileSystem;
 
     match cli.command {
         Command::Apply { file } => {
             let text = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
             let spec: WorkloadSpec = serde_json::from_str(&text).context("parsing spec JSON")?;
-            apply(&exec, &paths, &spec).await?;
+            apply(&exec, &fsys, &paths, &spec).await?;
             println!("applied {}", spec.name);
         }
         Command::Remove { name } => {
-            remove(&exec, &paths, &name).await?;
+            remove(&exec, &fsys, &paths, &name).await?;
             println!("removed {name}");
         }
         Command::Status { name } => {
-            let state = status(&exec, &paths, &name).await?;
+            let state = status(&exec, &fsys, &paths, &name).await?;
             println!("{}", state.label());
         }
         Command::List => {
-            for name in list(&paths).await? {
+            for name in list(&fsys, &paths).await? {
                 println!("{name}");
             }
         }
