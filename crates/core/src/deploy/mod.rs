@@ -71,6 +71,38 @@ impl DeployStatus {
     }
 }
 
+use crate::exec::Executor;
+use crate::fs::FileSystem;
+use crate::store::Store;
+use crate::workloads::paths::Paths;
+
+/// A deploy failure, tagged with the stage it happened in.
+#[derive(Debug, thiserror::Error)]
+#[error("deploy failed at {stage:?}: {message}")]
+pub struct DeployError {
+    pub stage: Stage,
+    pub message: String,
+}
+
+/// The terminal state of a deploy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeployOutcome {
+    /// Healthcheck passed. The only success.
+    Done { image: String },
+    /// A stage failed and compensation restored the previous version.
+    RolledBack { failed_at: Stage, cause: String },
+    /// A stage failed and compensation ALSO failed — host state is unknown.
+    Failed { failed_at: Stage, cause: String },
+}
+
+/// Everything a deploy stage needs, bundled so stages take one argument.
+pub struct Ctx<'a> {
+    pub exec: &'a dyn Executor,
+    pub fsys: &'a dyn FileSystem,
+    pub store: &'a Store,
+    pub paths: &'a Paths,
+}
+
 pub mod build;
 pub mod detect;
 
@@ -106,6 +138,34 @@ mod tests {
             DeployStatus::Failed,
         ] {
             assert_eq!(DeployStatus::from_str(status.as_str()), Some(status));
+        }
+    }
+
+    #[test]
+    fn deploy_error_names_its_stage() {
+        let err = DeployError {
+            stage: Stage::Healthcheck,
+            message: "timed out".into(),
+        };
+        let shown = err.to_string();
+        assert!(shown.contains("Healthcheck"), "shown: {shown}");
+        assert!(shown.contains("timed out"), "shown: {shown}");
+    }
+
+    #[test]
+    fn deploy_outcome_variants_carry_their_data() {
+        let done = DeployOutcome::Done {
+            image: "localhost/kuadrat-web:abc".into(),
+        };
+        let rolled = DeployOutcome::RolledBack {
+            failed_at: Stage::Route,
+            cause: "caddy".into(),
+        };
+        assert_ne!(done, rolled);
+        if let DeployOutcome::RolledBack { failed_at, .. } = rolled {
+            assert_eq!(failed_at, Stage::Route);
+        } else {
+            panic!("wrong variant");
         }
     }
 }
