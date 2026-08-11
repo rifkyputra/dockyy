@@ -237,7 +237,11 @@ async fn register_form(State(st): State<AppState>, Form(req): Form<RegisterReque
         route: req.route,
     };
     match st.store.register_app(&config) {
-        Ok(()) => Redirect::to(&format!("/app/{}", config.name)).into_response(),
+        Ok(()) => Redirect::to(&format!(
+            "/app/{}",
+            crate::pages::path_segment(&config.name)
+        ))
+        .into_response(),
         // A bare 400 tells the operator nothing; re-render the form they were
         // looking at with the reason on the page.
         Err(e) => (

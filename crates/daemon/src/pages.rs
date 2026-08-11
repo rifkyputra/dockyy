@@ -15,11 +15,34 @@ use kuadrat_core::logs::tail;
 use kuadrat_core::store::DeployRow;
 use kuadrat_core::workloads::query::status;
 use maud::{html, Markup, DOCTYPE};
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
 use crate::api::summarise;
 use crate::error::ApiResult;
 use crate::state::AppState;
 use crate::stream::events_sse;
+
+/// Everything but RFC 3986's unreserved marks (`-`, `.`, `_`, `~`) — in
+/// particular `/`, so a name containing one cannot climb out of the path
+/// segment it is placed in.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Percent-encode an app name for use as one path segment, in a redirect
+/// `Location` or an `href`/`action`. An app name is operator-chosen and not
+/// guaranteed to be ASCII — `Store::register_app` only requires the derived
+/// *slug* to be non-empty, not the name itself — so unescaped it can carry
+/// bytes a `Location` header cannot hold at all (`axum::response::Redirect`
+/// panics on those) or that would silently break an `href` (`&`, `#`, `?`).
+/// The route on the other end is exact: axum percent-decodes `:name` when
+/// matching `GET /app/:name`, so an encoded outbound path decodes back to the
+/// same name on the way in.
+pub(crate) fn path_segment(name: &str) -> String {
+    utf8_percent_encode(name, PATH_SEGMENT).to_string()
+}
 
 /// Whether this caller is a browser.
 ///
@@ -90,7 +113,7 @@ pub async fn index(State(st): State<AppState>) -> Markup {
                     @for config in configs {
                         @let summary = summarise(&st, config).await;
                         tr {
-                            td { a href={ "/app/" (summary.name) } { (summary.name) } }
+                            td { a href={ "/app/" (path_segment(&summary.name)) } { (summary.name) } }
                             td { (summary.repo_path) }
                             td {
                                 @if let Some(route) = &summary.route {
@@ -218,7 +241,7 @@ pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) ->
             }
         }
 
-        form id="redeploy" method="post" action={ "/api/apps/" (config.name) "/deploy" } {
+        form id="redeploy" method="post" action={ "/api/apps/" (path_segment(&config.name)) "/deploy" } {
             button type="submit" { "Redeploy" }
         }
 
@@ -508,6 +531,60 @@ mod tests {
         assert!(
             body.to_lowercase().contains("absolute"),
             "the reason must be on the page: {body}"
+        );
+    }
+
+    /// `axum::response::Redirect::to` panics if the `Location` it is given
+    /// isn't a valid header value — which any byte outside visible ASCII is
+    /// not. `register_app` only requires the derived slug to be non-empty, so
+    /// a name like this registers successfully; the redirect must not then
+    /// take the connection down on an action that actually worked.
+    #[tokio::test]
+    async fn a_non_ascii_name_registers_and_redirects_without_panicking() {
+        let (app, store, _hub, _d) = harness_parts();
+        let res = app
+            .oneshot(post_form("/apps", "name=caf%C3%A9&repo_path=/srv/web"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let location = res
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            location, "/app/caf%C3%A9",
+            "the location must carry the percent-encoded name, not the raw one"
+        );
+        assert!(store.app_config("café").expect("read").is_some());
+    }
+
+    /// The encoding and the route it feeds must agree: `GET /app/:name`
+    /// percent-decodes the segment it matches, so the encoded `Location`
+    /// handed back by registration must resolve to the same app, not a 404. A
+    /// hand-rolled encoder is exactly the kind of thing that would get this
+    /// half right.
+    #[tokio::test]
+    async fn the_redirect_location_round_trips_back_to_the_same_app() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let register_res = app
+            .clone()
+            .oneshot(post_form("/apps", "name=caf%C3%A9&repo_path=/srv/web"))
+            .await
+            .expect("send");
+        let location = register_res
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .expect("location")
+            .to_string();
+
+        let page_res = app.oneshot(get(&location)).await.expect("send");
+        assert_eq!(page_res.status(), StatusCode::OK);
+        let body = body_text(page_res).await;
+        assert!(
+            body.contains("/srv/web"),
+            "the encoded location must land on the app's own page: {body}"
         );
     }
 }

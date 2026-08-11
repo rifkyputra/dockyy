@@ -477,6 +477,7 @@ dependencies = [
  "futures-core",
  "kuadrat-core",
  "maud",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "serde_json",
