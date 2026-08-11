@@ -653,7 +653,6 @@ git commit -m "feat(cli): deploy through the daemon when one is running"
 ```ini
 [Unit]
 Description=kuadrat deploy daemon
-Documentation=https://github.com/…/kuadrat
 After=network.target podman.socket
 
 [Service]
