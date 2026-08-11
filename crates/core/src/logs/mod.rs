@@ -25,6 +25,7 @@
 //! [`LocalExecutor`]: crate::exec::local::LocalExecutor
 
 use anyhow::{bail, Context, Result};
+use tokio_stream::Stream;
 
 use crate::exec::Executor;
 use crate::spec::slug;
@@ -84,6 +85,37 @@ pub async fn search(
     args.push("--grep".to_string());
     args.push(pattern.to_string());
     run_journalctl(exec, &args, name).await
+}
+
+/// Follow a workload's journal: the last `lines` entries, then everything that
+/// arrives after.
+///
+/// Runs the bounded [`tail`] once first, and fails if it does. That is not
+/// redundancy: journald reports "you may not read this journal" on stderr while
+/// still exiting 0 and printing `-- No entries --` to stdout, so a stream
+/// carrying stdout alone cannot tell that apart from a quiet app. `tail`
+/// already makes that distinction and is already tested for it; the pre-flight
+/// borrows a correct detection rather than writing a weaker one against a data
+/// shape that cannot support it.
+pub async fn follow(
+    exec: &dyn Executor,
+    name: &str,
+    lines: usize,
+) -> Result<Box<dyn Stream<Item = Result<String>> + Send + Unpin>> {
+    tail(exec, name, lines).await?;
+
+    let lines = lines.clamp(1, MAX_LINES);
+    let args = vec![
+        "-u".to_string(),
+        unit_name(name),
+        "-f".to_string(),
+        "-n".to_string(),
+        lines.to_string(),
+        "--no-pager".to_string(),
+        "--output=short-iso".to_string(),
+    ];
+
+    exec.run_streaming("journalctl", &args).await
 }
 
 /// Reject a workload name that slugs to the empty string before any command
@@ -563,5 +595,69 @@ mod tests {
             exec.calls().is_empty(),
             "a name that slugs to empty must fail before journalctl runs"
         );
+    }
+
+    #[tokio::test]
+    async fn follow_asks_journalctl_to_follow_the_prefixed_unit() {
+        let exec = FakeExecutor::new();
+        exec.expect("journalctl", out(0, "-- No entries --\n", "")); // the pre-flight
+        exec.expect_stream("journalctl", vec!["line one".into()]);
+
+        let _stream = follow(&exec, "web", 100).await.expect("follow");
+
+        let (_, args) = &exec.calls()[1];
+        assert!(args.iter().any(|a| a == "-u"), "{args:?}");
+        assert!(args.iter().any(|a| a == "kuadrat-web"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-f"), "{args:?}");
+    }
+
+    /// The pre-flight exists for exactly this: journald reports an unreadable
+    /// journal on *stderr* while exiting 0, so a stream of stdout alone cannot
+    /// tell it from an app that has logged nothing. `tail` already detects it.
+    ///
+    /// `Result::unwrap_err` requires the `Ok` type to be `Debug`, which a
+    /// boxed `dyn Stream` trait object cannot be (a second, non-auto trait
+    /// bound isn't allowed on a trait object) — see the same workaround in
+    /// `exec::tests::an_executor_that_has_not_opted_in_bails_on_run_streaming`.
+    /// Match instead.
+    #[tokio::test]
+    async fn an_unreadable_journal_fails_before_any_stream_opens() {
+        let exec = FakeExecutor::new();
+        exec.expect(
+            "journalctl",
+            out(
+                0,
+                "-- No entries --\n",
+                "Hint: You are currently not seeing messages from other users and the system.\n",
+            ),
+        );
+
+        let err = match follow(&exec, "web", 100).await {
+            Ok(_) => panic!("expected the pre-flight to fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("journal"), "was: {err}");
+        assert_eq!(
+            exec.calls().len(),
+            1,
+            "the stream must not have been opened"
+        );
+    }
+
+    #[tokio::test]
+    async fn follows_backlog_is_clamped_like_every_other_read() {
+        let exec = FakeExecutor::new();
+        exec.expect("journalctl", out(0, "", ""));
+        exec.expect_stream("journalctl", vec![]);
+
+        let _stream = follow(&exec, "web", MAX_LINES + 500).await.expect("follow");
+
+        let (_, args) = &exec.calls()[1];
+        let n = args
+            .iter()
+            .position(|a| a == "-n")
+            .map(|i| &args[i + 1])
+            .expect("-n");
+        assert_eq!(n, &MAX_LINES.to_string());
     }
 }
