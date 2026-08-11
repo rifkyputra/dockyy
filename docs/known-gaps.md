@@ -3,6 +3,14 @@
 Carried forward from the phase-1 whole-branch review and its fix wave. Each entry is real, judged
 deferrable at the time, and worth re-reading before the phase it names.
 
+## From G5 — a per-row store error aborts the whole reconcile batch
+
+`deploy::reconcile` `?`-propagates store errors (`load_previous`/`finish_deploy`/`release_lock`) per
+row. If one `in_progress` deploy has, say, a corrupt stored spec JSON, reconcile returns `Err` and
+leaves the remaining `in_progress` rows unreconciled and that row's lock still held. It self-heals on
+the next startup run (reconcile is startup-idempotent), so it was deferred. A future pass could
+collect per-row errors into the returned outcomes and continue the batch instead of aborting.
+
 ## From G4b — a `release_lock` DB error drops the terminal outcome
 
 `deploy::run` propagates `release_lock(&name)?` after `run_stages`. If the SQLite `DELETE` fails
