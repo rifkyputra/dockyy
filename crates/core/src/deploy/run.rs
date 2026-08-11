@@ -62,7 +62,16 @@ pub async fn run_reserved(
     let slug = spec.slug();
     let previous = load_previous(ctx, &name)?;
 
-    // Everything past the lock must release it, whatever happens.
+    // Everything past the lock must release it, whatever happens. On the
+    // common path this is a no-op: `run_stages` ends by calling `finished`,
+    // which now releases this deploy's lock as part of the same transaction
+    // that writes its terminal status — so a subscriber can never observe
+    // "finished" while the lock is still held. This call stays as the
+    // backstop for the paths where `run_stages` returns `Err` without ever
+    // reaching a terminal write (a spec that fails to serialize, `put_spec`
+    // erroring) — no transaction ran, so the lock is still held and only
+    // this releases it. `release_lock` is idempotent, so keeping both is
+    // free on the path that already released.
     let result = run_stages(ctx, spec, repo, &slug, deploy_id, &previous).await;
     ctx.store.release_lock(&name)?;
     result
@@ -105,6 +114,19 @@ pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
         // The deploy is terminally finished either way — release its lock.
         ctx.store.release_lock(&row.app)?;
         outcomes.push(outcome);
+    }
+
+    // Run after the in-progress rollbacks above, not before: a deploy this
+    // very call just finished (and whose lock the loop above already
+    // released) is harmless to re-check here, and a lock orphaned by an
+    // older binary that predates `finish_deploy_with_event`'s own release —
+    // or by any other path that reached a terminal status without going
+    // through it — has no other recovery. `reconcile` runs on every daemon
+    // start and via `kuadrat reconcile`, so this is what actually frees a
+    // lock like the one found stuck on `h7servedemo`.
+    let freed = ctx.store.release_orphaned_locks()?;
+    for app in &freed {
+        eprintln!("released orphaned lock: {app}");
     }
 
     Ok(outcomes)

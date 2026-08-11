@@ -203,8 +203,8 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically finish a deploy and append its terminal event, in one
-    /// SQLite transaction.
+    /// Atomically finish a deploy, append its terminal event, and release its
+    /// lock, in one SQLite transaction.
     ///
     /// `finish_deploy` and `append_event` are two separate writes/locks. The
     /// SSE handler reads the `deploys` row and the event backlog as two
@@ -218,9 +218,21 @@ impl Store {
     /// `in_progress` with no terminal event, or a terminal row with its event
     /// — never the state where the row says done and the log hasn't caught up.
     ///
+    /// The lock release rides in the same transaction for the same reason:
+    /// `run_reserved` used to publish the terminal event and only *then*
+    /// release the lock as a third, separate write, so a subscriber that
+    /// acted on "this deploy is finished" (the acceptance script draining
+    /// SSE and stopping the daemon) could land in the window where the lock
+    /// was still held — permanently, since nothing re-checks a terminal
+    /// deploy's lock. Deleting it here means the sink is only ever told
+    /// after the lock is already gone. Scoped to `deploy_id`, not `app`, so
+    /// it can never release a lock a *different* deploy of the same app
+    /// currently holds.
+    ///
     /// `reserve`'s rejection path must keep calling plain `finish_deploy`, not
     /// this: it deliberately writes no event, because the caller gets `Err`
-    /// and a 409 and is never handed the id to watch.
+    /// and a 409 and is never handed the id to watch. It also never held the
+    /// lock it's finishing, so there's nothing for it to release here.
     pub fn finish_deploy_with_event(
         &self,
         deploy_id: i64,
@@ -242,6 +254,9 @@ impl Store {
         if n == 0 {
             bail!("no deploy with id {deploy_id}");
         }
+
+        tx.execute("DELETE FROM locks WHERE deploy_id = ?1", params![deploy_id])
+            .context("releasing this deploy's lock")?;
 
         let event = Event::finished(deploy_id, status, detail.map(str::to_string));
         let (stage, ev_status) = event.kind.columns();
@@ -348,6 +363,39 @@ impl Store {
         conn.execute("DELETE FROM locks WHERE app = ?1", params![app])
             .context("releasing lock")?;
         Ok(())
+    }
+
+    /// Release locks whose deploy has already finished.
+    ///
+    /// `finish_deploy_with_event` releases a lock as part of the deploy that
+    /// holds it, but that only covers deploys that finish through it. A lock
+    /// can still be orphaned — a binary older than that fix, or an error path
+    /// that never reached a terminal write at all — and nothing else ever
+    /// looks at a *terminal* deploy's lock again (`in_progress_deploys`, what
+    /// `reconcile` otherwise drives off of, only sees deploys still running).
+    /// This is the backstop: anything with a finished deploy underneath it is
+    /// safe to release, whenever this runs.
+    ///
+    /// Returns the apps freed, so the caller can say what it recovered.
+    pub fn release_orphaned_locks(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store lock");
+        let mut stmt = conn
+            .prepare(
+                "DELETE FROM locks WHERE deploy_id IN
+                 (SELECT id FROM deploys WHERE status != ?1) RETURNING app",
+            )
+            .context("preparing orphaned-lock release")?;
+        let rows = stmt
+            .query_map(params![DeployStatus::InProgress.as_str()], |row| {
+                row.get::<_, String>(0)
+            })
+            .context("releasing orphaned locks")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading freed app")?);
+        }
+        Ok(out)
     }
 
     /// Append one event and return it as stored: the same event, plus the id
@@ -800,6 +848,47 @@ mod tests {
     fn releasing_an_unheld_lock_is_ok() {
         let (_dir, store) = open_temp();
         store.release_lock("never-held").expect("no error");
+    }
+
+    /// A lock whose deploy already reached a terminal status is orphaned —
+    /// nothing will ever release it otherwise. `release_orphaned_locks` is
+    /// the recovery path for exactly the `h7servedemo` state found on the
+    /// real host: `done`, but still locked.
+    #[test]
+    fn release_orphaned_locks_frees_a_lock_whose_deploy_is_done() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store.acquire_lock("web", id).expect("acquire");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish (plain, no lock release)");
+
+        let freed = store.release_orphaned_locks().expect("release orphaned");
+        assert_eq!(freed, vec!["web".to_string()]);
+        assert!(
+            store
+                .acquire_lock("web", 999)
+                .expect("acquire after release"),
+            "the orphaned lock must be gone"
+        );
+    }
+
+    /// The half that matters: a lock whose deploy is still `in_progress`
+    /// must be left alone. Freeing an in-flight deploy's lock would let a
+    /// second deploy of the same app start concurrently — worse than the
+    /// stuck-lock bug this method exists to fix.
+    #[test]
+    fn release_orphaned_locks_leaves_an_in_progress_deploys_lock_alone() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store.acquire_lock("web", id).expect("acquire");
+
+        let freed = store.release_orphaned_locks().expect("release orphaned");
+        assert!(freed.is_empty(), "nothing should be freed: {freed:?}");
+        assert!(
+            !store.acquire_lock("web", 999).expect("acquire attempt"),
+            "the in-progress deploy's lock must still be held"
+        );
     }
 
     #[test]
@@ -1418,6 +1507,49 @@ mod tests {
             }
         );
         assert_eq!(events[0].event.detail.as_deref(), Some("all stages ok"));
+    }
+
+    /// Finding 1: a successful deploy must not leave its lock held once a
+    /// reader can see the terminal status. Checking `acquire_lock` succeeds
+    /// is the same read a subscriber's next deploy attempt makes — if the
+    /// lock were still there, this would fail the way the stuck
+    /// `h7servedemo` lock failed on the real host.
+    #[test]
+    fn finish_deploy_with_event_releases_the_deploys_own_lock() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        assert!(store.acquire_lock("web", id).expect("acquire"));
+
+        store
+            .finish_deploy_with_event(id, DeployStatus::Done, None)
+            .expect("finish with event");
+
+        assert!(
+            store
+                .acquire_lock("web", 999)
+                .expect("acquire after finish"),
+            "the lock held by the finished deploy must be gone"
+        );
+    }
+
+    /// The delete is scoped to the finishing deploy's own lock row, not to
+    /// its app name — a lock belonging to a different deploy of a different
+    /// app must survive untouched.
+    #[test]
+    fn finish_deploy_with_event_does_not_touch_another_apps_lock() {
+        let (_dir, store) = open_temp();
+        let web_id = store.create_deploy("web").expect("create web");
+        let api_id = store.create_deploy("api").expect("create api");
+        assert!(store.acquire_lock("api", api_id).expect("acquire api"));
+
+        store
+            .finish_deploy_with_event(web_id, DeployStatus::Done, None)
+            .expect("finish web");
+
+        assert!(
+            !store.acquire_lock("api", 999).expect("acquire attempt"),
+            "api's lock, held by a different deploy, must still be held"
+        );
     }
 
     /// A deploy id that does not exist must fail before either write commits
