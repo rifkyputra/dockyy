@@ -126,15 +126,26 @@ fn escape_config_value(value: &str) -> String {
 /// The format is line-oriented: each directive is its own line, and a value
 /// runs to the closing quote curl finds on that same line. A raw newline
 /// inside a value would therefore not stay inside the value — it would end
-/// the `data =` line early and hand curl a fresh line to interpret as its
+/// the `data-raw =` line early and hand curl a fresh line to interpret as its
 /// *next* option (an `output = /path` embedded in event detail text is not
 /// hypothetical: deploy details carry raw command stderr). `escape_config_value`
 /// closes that off using curl's own escape set (`\n`, `\r`, `\t`, `\v`, plus
 /// `\\` and `\"`) for the characters it understands, and a literal space for
 /// any other control byte, which curl has no escape for.
+///
+/// The directive is `data-raw`, not `data`: curl's `--data` treats a leading
+/// `@` in its value as a filename to read and POST, on the command line and
+/// in a `--config` document alike. `escape_config_value` does not touch `@`
+/// (there is nothing in it that would break the config format), so a body
+/// beginning with `@` would otherwise make curl read a local file and POST
+/// its contents to the webhook URL. Today `body` always comes from
+/// [`payload`], which always emits a JSON object starting with `{` — but
+/// that is a property of the caller, and this function is `pub`. `--data-raw`
+/// has no `@` special case, so the guard lives here instead of depending on
+/// every future caller to keep providing it.
 pub fn curl_config(url: &str, body: &str) -> String {
     format!(
-        "url = \"{}\"\nheader = \"Content-Type: application/json\"\ndata = \"{}\"\n",
+        "url = \"{}\"\nheader = \"Content-Type: application/json\"\ndata-raw = \"{}\"\n",
         escape_config_value(url),
         escape_config_value(body),
     )
@@ -338,6 +349,26 @@ mod tests {
         );
     }
 
+    /// curl's `--data` treats a leading `@` as a filename to read and POST,
+    /// and `escape_config_value` has no reason to touch `@` (it does not
+    /// break the config format). The only thing standing between a body
+    /// starting with `@` and curl reading a local file is the directive
+    /// being `data-raw`, not `data` — this asserts that directly rather than
+    /// relying on `payload` always emitting `{` first, which is a property
+    /// of the caller, not of this function.
+    #[test]
+    fn a_body_beginning_with_at_is_not_read_as_a_filename() {
+        let cfg = curl_config("https://example.com/h", "@/etc/passwd");
+        assert!(
+            cfg.contains("data-raw = \"@/etc/passwd\""),
+            "must use data-raw, which has no @ special case: {cfg}"
+        );
+        assert!(
+            !cfg.contains("\ndata =") && !cfg.contains("data = \""),
+            "the plain `data` directive treats a leading @ as a filename: {cfg}"
+        );
+    }
+
     /// A quote or a backslash in the body must not end the config value early
     /// — that would truncate the request or, worse, let a log line inject a
     /// curl option. Uses a fixture with no pre-escaped sequences, so this
@@ -348,7 +379,7 @@ mod tests {
         let cfg = curl_config("https://example.com/h", r#"say "hi" C:\x"#);
         let data_line = cfg
             .lines()
-            .find_map(|l| l.strip_prefix("data = "))
+            .find_map(|l| l.strip_prefix("data-raw = "))
             .expect("a data line");
         assert_eq!(data_line, r#""say \"hi\" C:\\x""#);
     }
@@ -376,7 +407,7 @@ mod tests {
         let cfg = curl_config("https://example.com/h", "a\nb\tc\rd\x0be");
         let data = cfg
             .lines()
-            .find(|l| l.starts_with("data = "))
+            .find(|l| l.starts_with("data-raw = "))
             .expect("data line");
         assert!(data.contains(r"\n"), "{data}");
         assert!(data.contains(r"\t"), "{data}");
@@ -398,7 +429,7 @@ mod tests {
         let cfg = curl_config("https://example.com/h", "a\x00b\x1fc\x7fd");
         let data_line = cfg
             .lines()
-            .find_map(|l| l.strip_prefix("data = "))
+            .find_map(|l| l.strip_prefix("data-raw = "))
             .expect("a data line");
         assert_eq!(data_line, r#""a b c d""#);
     }
