@@ -8,14 +8,28 @@ ExecStart=/usr/local/bin/kuadrat serve --listen 127.0.0.1:7457
 Restart=on-failure
 RestartSec=2
 
+# Optional: send terminal deploy outcomes and stage failures to a webhook.
+# Set KUADRAT_WEBHOOK_URL_FILE, not KUADRAT_WEBHOOK_URL, and give it a file
+# via EnvironmentFile= rather than an Environment= line — a webhook URL
+# carries its token in its path, and unlike an Environment= line (readable by
+# anyone who can run `systemctl show`), EnvironmentFile='s contents are not.
+# The referenced file should hold one line: KUADRAT_WEBHOOK_URL_FILE=/etc/kuadrat/webhook-url
+#EnvironmentFile=/etc/kuadrat/webhook.env
+
 # Deliberately minimal. This service writes Quadlet units into
 # /etc/containers/systemd, runs podman, and calls systemctl daemon-reload;
 # most of what a hardening template switches on breaks at least one of the
-# three. These two are compatible with all of them, and the acceptance script
-# completes a real deploy with this file as shipped — a hardening directive
-# that was never run is an assumption, not a protection.
+# three. NoNewPrivileges is compatible with all of them and is the only
+# directive here. ProtectHome was tried and dropped: README.md documents
+# repos deployed from ~/apps/..., and ProtectHome=yes makes /home
+# inaccessible to the service, which breaks detect/build on exactly that
+# path. Nothing here has been exercised end to end as an installed,
+# daemon-reloaded, systemctl-started unit — the acceptance scripts run the
+# binary directly from a root shell, where none of this section applies — so
+# this file claims only what NoNewPrivileges alone is: a directive that does
+# not conflict with the three things this service does, not a directive that
+# was proven not to.
 NoNewPrivileges=yes
-ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
