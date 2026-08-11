@@ -14,6 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::deploy::{DeployStatus, Stage};
 use crate::events::{Event, EventStatus, StoredEvent};
+use crate::spec::Route;
 
 // Inter-table references (deploys.app, events.deploy_id, locks.deploy_id) are
 // unenforced by design in G1 — SQLite needs PRAGMA foreign_keys and explicit
@@ -47,6 +48,13 @@ CREATE TABLE IF NOT EXISTS events (
     detail     TEXT,
     at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS app_config (
+    name         TEXT PRIMARY KEY,
+    repo_path    TEXT NOT NULL,
+    route_domain TEXT,
+    route_port   INTEGER,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ";
 
 /// One row of deploy history.
@@ -57,6 +65,20 @@ pub struct DeployRow {
     pub stage: Stage,
     pub status: DeployStatus,
     pub detail: Option<String>,
+}
+
+/// What the operator asked for: where an app's source lives, and optionally
+/// the domain it should be served on.
+///
+/// Distinct from the `apps` row, which records what was actually deployed. A
+/// registration exists from the moment someone adds the app; a deployed spec
+/// only exists after a deploy succeeds. Keeping them apart is what lets an app
+/// be registered before it has ever been built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppConfig {
+    pub name: String,
+    pub repo_path: String,
+    pub route: Option<Route>,
 }
 
 /// Durable state. Synchronous; the async engine holds it as `&Store` and each
@@ -275,6 +297,45 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Register an app, or replace an existing registration.
+    ///
+    /// The upsert writes every column unconditionally, including the route
+    /// columns when the route is `None`. Writing only the non-null values
+    /// would make clearing a route impossible — the app would keep serving on
+    /// a domain the operator had just removed.
+    pub fn register_app(&self, config: &AppConfig) -> Result<()> {
+        let (domain, port) = match &config.route {
+            Some(route) => (Some(route.domain.as_str()), Some(route.port as i64)),
+            None => (None, None),
+        };
+        let conn = self.conn.lock().expect("store lock");
+        conn.execute(
+            "INSERT INTO app_config (name, repo_path, route_domain, route_port, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(name) DO UPDATE SET
+               repo_path    = excluded.repo_path,
+               route_domain = excluded.route_domain,
+               route_port   = excluded.route_port,
+               updated_at   = datetime('now')",
+            params![config.name, config.repo_path, domain, port],
+        )
+        .context("registering app")?;
+        Ok(())
+    }
+
+    /// The registration for `name`, or `None` if it was never registered.
+    pub fn app_config(&self, name: &str) -> Result<Option<AppConfig>> {
+        let conn = self.conn.lock().expect("store lock");
+        conn.query_row(
+            "SELECT name, repo_path, route_domain, route_port FROM app_config WHERE name = ?1",
+            params![name],
+            app_config_row,
+        )
+        .optional()
+        .context("reading app config")?
+        .transpose()
+    }
 }
 
 /// Read a `(id, app, stage, status, detail)` row. The outer `rusqlite::Result`
@@ -341,6 +402,44 @@ fn build_event(
             status,
             detail,
         },
+    })
+}
+
+/// Read a `(name, repo_path, route_domain, route_port)` row. The outer
+/// `rusqlite::Result` is the column read; the inner `anyhow::Result` is the
+/// route reconstruction, which can fail on a port outside `u16`.
+fn app_config_row(row: &rusqlite::Row) -> rusqlite::Result<Result<AppConfig>> {
+    Ok(build_app_config(
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+    ))
+}
+
+fn build_app_config(
+    name: String,
+    repo_path: String,
+    domain: Option<String>,
+    port: Option<i64>,
+) -> Result<AppConfig> {
+    // Both columns are written together, so one without the other means the
+    // row was edited outside kuadrat. Refuse it rather than serve half a route.
+    let route = match (domain, port) {
+        (Some(domain), Some(port)) => {
+            let port = u16::try_from(port).map_err(|_| {
+                anyhow!("app {name:?} has route port {port}, which is outside 1-65535")
+            })?;
+            Some(Route { domain, port })
+        }
+        (None, None) => None,
+        (Some(_), None) => bail!("app {name:?} has a route domain but no port"),
+        (None, Some(_)) => bail!("app {name:?} has a route port but no domain"),
+    };
+    Ok(AppConfig {
+        name,
+        repo_path,
+        route,
     })
 }
 
@@ -717,6 +816,171 @@ mod tests {
         assert!(
             !reopened.acquire_lock("web", 999).expect("acquire attempt"),
             "the lock acquired before the reopen should still be held"
+        );
+    }
+
+    fn cfg(name: &str, repo: &str, route: Option<Route>) -> AppConfig {
+        AppConfig {
+            name: name.into(),
+            repo_path: repo.into(),
+            route,
+        }
+    }
+
+    #[test]
+    fn a_registered_app_reads_back_with_its_repo_path() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .register_app(&cfg("web", "/srv/web", None))
+            .expect("register");
+
+        let got = store.app_config("web").expect("read").expect("present");
+        assert_eq!(got.name, "web");
+        assert_eq!(got.repo_path, "/srv/web");
+        assert_eq!(got.route, None);
+    }
+
+    #[test]
+    fn a_route_survives_the_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let route = Route {
+            domain: "example.com".into(),
+            port: 3000,
+        };
+
+        store
+            .register_app(&cfg("web", "/srv/web", Some(route.clone())))
+            .expect("register");
+
+        let got = store.app_config("web").expect("read").expect("present");
+        assert_eq!(got.route, Some(route));
+    }
+
+    #[test]
+    fn app_config_is_none_for_an_unregistered_app() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        assert_eq!(store.app_config("ghost").expect("read"), None);
+    }
+
+    /// Re-registering replaces the row rather than failing or duplicating —
+    /// the UI's registration form is also how you correct a wrong path.
+    #[test]
+    fn registering_the_same_name_again_replaces_it() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .register_app(&cfg("web", "/srv/old", None))
+            .expect("first");
+        store
+            .register_app(&cfg(
+                "web",
+                "/srv/new",
+                Some(Route {
+                    domain: "example.com".into(),
+                    port: 8080,
+                }),
+            ))
+            .expect("second");
+
+        let got = store.app_config("web").expect("read").expect("present");
+        assert_eq!(got.repo_path, "/srv/new");
+        assert_eq!(got.route.expect("route").port, 8080);
+    }
+
+    /// Clearing a route must actually clear it. An upsert that only writes
+    /// non-null values would leave the old route in place, and the app would
+    /// keep serving on a domain the operator just removed.
+    #[test]
+    fn re_registering_without_a_route_clears_the_previous_one() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .register_app(&cfg(
+                "web",
+                "/srv/web",
+                Some(Route {
+                    domain: "example.com".into(),
+                    port: 3000,
+                }),
+            ))
+            .expect("first");
+        store
+            .register_app(&cfg("web", "/srv/web", None))
+            .expect("second");
+
+        let got = store.app_config("web").expect("read").expect("present");
+        assert_eq!(got.route, None, "route should have been cleared");
+    }
+
+    /// Opening the same file twice must not fail — `Store::open` runs the
+    /// schema batch every time, and the acceptance host's database already
+    /// exists.
+    #[test]
+    fn opening_an_existing_store_twice_succeeds() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("k.db");
+
+        let first = Store::open(&path).expect("first open");
+        first
+            .register_app(&cfg("web", "/srv/web", None))
+            .expect("register");
+        drop(first);
+
+        let second = Store::open(&path).expect("second open");
+        let got = second.app_config("web").expect("read").expect("present");
+        assert_eq!(got.repo_path, "/srv/web");
+    }
+
+    /// The real migration case: a database created before this table existed
+    /// must gain it on open, with its existing rows intact.
+    #[test]
+    fn a_pre_h2_database_gains_the_table_and_keeps_its_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("k.db");
+
+        // A database with only the pre-H2 tables, created without Store::open.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("raw open");
+            conn.execute_batch(
+                "CREATE TABLE apps (
+                     name       TEXT PRIMARY KEY,
+                     slug       TEXT NOT NULL UNIQUE,
+                     spec_json  TEXT NOT NULL,
+                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );",
+            )
+            .expect("old schema");
+            conn.execute(
+                "INSERT INTO apps (name, slug, spec_json) VALUES ('legacy', 'legacy', '{}')",
+                [],
+            )
+            .expect("seed");
+        }
+
+        let store = Store::open(&path).expect("open upgrades");
+
+        // The new table works...
+        store
+            .register_app(&cfg("legacy", "/srv/legacy", None))
+            .expect("register");
+        assert_eq!(
+            store
+                .app_config("legacy")
+                .expect("read")
+                .expect("present")
+                .repo_path,
+            "/srv/legacy"
+        );
+        // ...and the pre-existing row was not disturbed.
+        assert_eq!(
+            store.current_spec("legacy").expect("spec").as_deref(),
+            Some("{}")
         );
     }
 }
