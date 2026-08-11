@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 
 use crate::spec::{slug, WorkloadSpec};
@@ -5,6 +7,13 @@ use crate::workloads::paths::UNIT_PREFIX;
 
 /// Marker identifying a unit file kuadrat generated and may overwrite.
 pub const MANAGED_MARKER: &str = "# kuadrat-managed: true";
+
+/// Per-attempt timeout for a `podman healthcheck run` call, shared with
+/// `deploy::health`'s poll loop. Lives here (rather than in `deploy::health`)
+/// because `deploy` already depends on `workloads`, not the other way round;
+/// `deploy::health` imports this constant so podman's own `HealthTimeout=`
+/// and kuadrat's `tokio::time::timeout` never drift apart.
+pub const HEALTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Container name kuadrat assigns to a workload. Shares the unit-file prefix, so the
 /// container, the unit file, and the systemd service all carry the same namespace.
@@ -75,6 +84,13 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
     }
     if let Some(health) = &spec.health_cmd {
         out.push_str(&format!("HealthCmd={health}\n"));
+        // Keep podman's own limit in step with kuadrat's per-attempt timeout
+        // (deploy::health), so a hanging health command is cut off at the
+        // same point on both sides rather than podman's default governing.
+        out.push_str(&format!(
+            "HealthTimeout={}s\n",
+            HEALTH_ATTEMPT_TIMEOUT.as_secs()
+        ));
     }
     if let Some(command) = &spec.command {
         let argv: Vec<String> = command
@@ -165,6 +181,24 @@ mod tests {
 
         let err = render(&spec).expect_err("render validates");
         assert!(err.to_string().contains("line break"), "{err}");
+    }
+
+    #[test]
+    fn a_health_cmd_renders_a_matching_health_timeout() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.health_cmd = Some("curl -fsS localhost/health".into());
+        let unit = render(&spec).expect("render");
+        assert!(
+            unit.contains("HealthCmd=curl -fsS localhost/health\n"),
+            "unit was:\n{unit}"
+        );
+        assert!(
+            unit.contains(&format!(
+                "HealthTimeout={}s\n",
+                HEALTH_ATTEMPT_TIMEOUT.as_secs()
+            )),
+            "unit was:\n{unit}"
+        );
     }
 
     #[test]

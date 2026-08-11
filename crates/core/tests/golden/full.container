@@ -12,6 +12,7 @@ Environment=NODE_ENV=production
 Environment=PORT=3000
 Secret=db-password
 HealthCmd=curl -fsS http://localhost:3000/health
+HealthTimeout=5s
 Exec=node server.js --port 3000
 
 [Service]
