@@ -4,24 +4,56 @@
 //! interaction, and both bound their output: this module never runs
 //! `journalctl -f`. Live tailing needs a streaming seam that does not exist
 //! yet, and arrives in phase 4 where the agent surface needs it too.
+//!
+//! ## The privilege signal depends on an unsuppressed stderr
+//!
+//! [`journal_unreadable`] tells "this app is quiet" apart from "this process
+//! cannot read the journal" by inspecting journald's own stderr hint. That
+//! hint is emitted through systemd's logging, which honours
+//! `$SYSTEMD_LOG_LEVEL` from the *inherited* environment — [`LocalExecutor`]
+//! runs `Command::output()` without clearing or overriding it. If the
+//! process kuadrat runs under (or something upstream of it) has set
+//! `SYSTEMD_LOG_LEVEL=warning` or higher, journalctl suppresses the hint
+//! exactly as `-q` would: empty stderr, exit 0, and this module returns
+//! `Ok(vec![])` for a journal it was never able to read. `Executor` has no
+//! environment parameter today, so this cannot be fixed inside this module —
+//! the daemon must not set `SYSTEMD_LOG_LEVEL` to `warning` or above, and a
+//! more durable fix (pinning `SYSTEMD_LOG_LEVEL=info` and `LC_ALL=C` for the
+//! journalctl child specifically) belongs with a future `Executor` env
+//! parameter, not a workaround here.
+//!
+//! [`LocalExecutor`]: crate::exec::local::LocalExecutor
 
 use anyhow::{bail, Context, Result};
 
 use crate::exec::Executor;
+use crate::spec::slug;
 use crate::workloads::paths::unit_name;
 
-/// Most lines any one read will return, whatever the caller asks for.
+/// Most journal entries any one read will return, whatever the caller asks
+/// for.
 ///
-/// A bound rather than a preference: an unbounded read on a chatty unit can
-/// return a great deal of text, and every consumer of this module puts it in
-/// an HTTP response.
+/// This bounds entry *count*, not response size: journald's `LineMax`
+/// defaults to 48 KiB per line, so `MAX_LINES` alone does not bound bytes.
+/// See [`MAX_LINE_BYTES`] for the per-line bound that closes that gap.
 pub const MAX_LINES: usize = 1000;
+
+/// Most bytes any one line will carry before it is truncated.
+///
+/// journald's own `LineMax` defaults to 48 KiB, and that is how container
+/// stdout is captured — one chatty line can be tens of kilobytes wide, and
+/// `MAX_LINES` does nothing to stop it. Without this, `MAX_LINES` lines at
+/// up to 48 KiB each is a ~48 MB `Vec<String>` that the daemon then
+/// serialises whole into one JSON response. Truncation happens in
+/// [`parse_lines`], at a char boundary, and leaves a visible marker.
+const MAX_LINE_BYTES: usize = 8 * 1024;
 
 /// The last `lines` journal entries for a workload, oldest first.
 ///
 /// `lines` is clamped to `1..=MAX_LINES`. Zero is clamped **up**, because
 /// `journalctl -n 0` means "no limit" rather than "no lines".
 pub async fn tail(exec: &dyn Executor, name: &str, lines: usize) -> Result<Vec<String>> {
+    reject_empty_slug(name)?;
     let args = base_args(name, lines);
     run_journalctl(exec, &args, name).await
 }
@@ -43,6 +75,7 @@ pub async fn search(
     pattern: &str,
     lines: usize,
 ) -> Result<Vec<String>> {
+    reject_empty_slug(name)?;
     if pattern.is_empty() {
         bail!("search pattern must not be empty; use tail to read without filtering");
     }
@@ -51,6 +84,25 @@ pub async fn search(
     args.push("--grep".to_string());
     args.push(pattern.to_string());
     run_journalctl(exec, &args, name).await
+}
+
+/// Reject a workload name that slugs to the empty string before any command
+/// runs.
+///
+/// `WorkloadSpec::validate` rejects this same input for every other entry
+/// point into `core` (a name like `"!!!"` has no letter or digit to slug
+/// to). Without this check, `tail`/`search` would ask journalctl for unit
+/// `kuadrat-`, get no matches, and read that back as "this app is quiet" —
+/// the one door in `core` that accepted what the rest of it refuses.
+fn reject_empty_slug(name: &str) -> Result<()> {
+    if slug(name).is_empty() {
+        bail!(
+            "workload name {:?} yields an empty identifier; it needs at least one \
+             letter or digit",
+            name
+        );
+    }
+    Ok(())
 }
 
 /// The argv every read shares. `--output=short-iso` keeps a timestamp on each
@@ -84,31 +136,63 @@ async fn run_journalctl(exec: &dyn Executor, args: &[String], name: &str) -> Res
         bail!("journalctl failed for {name}: {}", out.stderr.trim());
     }
 
-    if journal_unreadable(&out.stderr) {
+    // The privilege hint is only decisive when there is nothing else to show:
+    // journald derives it from group membership, independently of whether
+    // any entries were found, so "hint on stderr AND real lines on stdout"
+    // is reachable. Checking `lines.is_empty()` first keeps "empty versus
+    // forbidden" distinct without discarding real output on a false
+    // positive.
+    let lines = parse_lines(&out.stdout);
+    if lines.is_empty() && journal_unreadable(&out.stderr) {
         bail!(
             "cannot read the system journal for {name}: run as root, or add the \
              user to the systemd-journal group"
         );
     }
 
-    Ok(parse_lines(&out.stdout))
+    Ok(lines)
 }
 
 /// Detect journald's "you are only seeing your own messages" hint on stderr.
 ///
-/// Matched on the distinctive phrase rather than the whole sentence so a
-/// reworded hint in a future systemd still trips it.
+/// This is a version-coupled string match, verified against systemd 255 on
+/// the validated host — not a semantic parse of the hint. It survives
+/// rewording *around* the matched phrases, but a systemd release that
+/// rewords the phrases themselves degrades this silently to `Ok(vec![])`
+/// rather than failing loudly, because there is no error to distinguish "no
+/// hint was printed" from "the hint changed shape". Three phrases are
+/// accepted so a partial rewording of any one of them still trips it.
 fn journal_unreadable(stderr: &str) -> bool {
     stderr.contains("not seeing messages")
+        || stderr.contains("systemd-journal")
+        || stderr.contains("Users in groups")
 }
 
-/// Split journald's stdout into lines, dropping the empty-result marker.
+/// Split journald's stdout into lines, dropping the empty-result marker and
+/// truncating any line over [`MAX_LINE_BYTES`].
 fn parse_lines(stdout: &str) -> Vec<String> {
     stdout
         .lines()
         .filter(|line| line.trim() != "-- No entries --")
-        .map(|line| line.to_string())
+        .map(truncate_line)
         .collect()
+}
+
+/// Truncate `line` to at most [`MAX_LINE_BYTES`] bytes, cutting at a char
+/// boundary — slicing a `str` at an arbitrary byte offset panics if it lands
+/// inside a multi-byte character — and appending a visible marker so a
+/// truncated line is never mistaken for the app's own output.
+fn truncate_line(line: &str) -> String {
+    if line.len() <= MAX_LINE_BYTES {
+        return line.to_string();
+    }
+
+    let mut end = MAX_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{} …[truncated]", &line[..end])
 }
 
 #[cfg(test)]
@@ -362,5 +446,122 @@ mod tests {
 
         let err = search(&exec, "web", "timeout", 10).await.unwrap_err();
         assert!(err.to_string().contains("journal"), "message was: {err}");
+    }
+
+    /// A hint on stderr must not shadow real entries on stdout: journald's
+    /// privilege hint fires on group membership alone, independent of
+    /// whether anything was found, so it must only be treated as an error
+    /// when there is nothing else to return.
+    #[tokio::test]
+    async fn a_privilege_hint_alongside_real_lines_does_not_error() {
+        let exec = FakeExecutor::new();
+        exec.expect(
+            "journalctl",
+            out(
+                0,
+                "first entry\n",
+                "Hint: You are currently not seeing messages from other users and the system.\n",
+            ),
+        );
+
+        let lines = tail(&exec, "web", 10).await.expect("tail");
+        assert_eq!(lines, vec!["first entry"]);
+    }
+
+    #[tokio::test]
+    async fn a_line_over_the_byte_cap_is_truncated_with_a_marker() {
+        let exec = FakeExecutor::new();
+        let long_line = "a".repeat(MAX_LINE_BYTES + 500);
+        exec.expect("journalctl", out(0, &format!("{long_line}\n"), ""));
+
+        let lines = tail(&exec, "web", 10).await.expect("tail");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() < long_line.len(),
+            "line should have been shortened"
+        );
+        assert!(
+            lines[0].ends_with("…[truncated]"),
+            "line should carry the truncation marker: {}",
+            &lines[0][lines[0].len().saturating_sub(40)..]
+        );
+    }
+
+    /// Truncating must land on a char boundary. A line made entirely of a
+    /// multi-byte character whose byte width does not evenly divide
+    /// `MAX_LINE_BYTES` would panic on a naive `&line[..MAX_LINE_BYTES]`.
+    #[tokio::test]
+    async fn a_multi_byte_line_over_the_cap_is_truncated_without_panicking() {
+        let exec = FakeExecutor::new();
+        // '日' is 3 bytes wide in UTF-8; MAX_LINE_BYTES (8192) is not a
+        // multiple of 3, so a naive byte slice would land mid-character.
+        let long_line = "日".repeat(MAX_LINE_BYTES);
+        exec.expect("journalctl", out(0, &format!("{long_line}\n"), ""));
+
+        let lines = tail(&exec, "web", 10).await.expect("tail");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with("…[truncated]"), "got: {}", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn a_short_line_is_untouched() {
+        let exec = FakeExecutor::new();
+        exec.expect("journalctl", out(0, "just a normal line\n", ""));
+
+        let lines = tail(&exec, "web", 10).await.expect("tail");
+        assert_eq!(lines, vec!["just a normal line"]);
+    }
+
+    /// `journal_unreadable` accepts three phrasings so a partial rewording
+    /// of systemd's hint still trips it.
+    #[tokio::test]
+    async fn each_accepted_hint_phrasing_is_detected() {
+        for phrase in [
+            "Hint: You are currently not seeing messages from other users and the system.",
+            "Users in groups 'adm', 'systemd-journal' can see all messages.",
+            "some future wording mentions systemd-journal directly",
+        ] {
+            let exec = FakeExecutor::new();
+            exec.expect("journalctl", out(0, "-- No entries --\n", phrase));
+
+            let err = tail(&exec, "web", 10).await.unwrap_err();
+            assert!(
+                err.to_string().contains("journal"),
+                "phrase {phrase:?} should have been detected, got: {err}"
+            );
+        }
+    }
+
+    /// `WorkloadSpec::validate` rejects a name that slugs to empty; `logs`
+    /// must refuse the same input rather than reading "no matches" back as
+    /// "this app is quiet".
+    #[tokio::test]
+    async fn tail_rejects_a_name_that_slugs_to_empty() {
+        let exec = FakeExecutor::new();
+
+        let err = tail(&exec, "!!!", 10).await.unwrap_err();
+        assert!(
+            err.to_string().contains("empty identifier"),
+            "message was: {err}"
+        );
+        assert!(
+            exec.calls().is_empty(),
+            "a name that slugs to empty must fail before journalctl runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_name_that_slugs_to_empty() {
+        let exec = FakeExecutor::new();
+
+        let err = search(&exec, "!!!", "timeout", 10).await.unwrap_err();
+        assert!(
+            err.to_string().contains("empty identifier"),
+            "message was: {err}"
+        );
+        assert!(
+            exec.calls().is_empty(),
+            "a name that slugs to empty must fail before journalctl runs"
+        );
     }
 }
