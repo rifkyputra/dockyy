@@ -88,6 +88,7 @@ pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
                 );
                 ctx.store
                     .finish_deploy(row.id, DeployStatus::RolledBack, Some(&cause))?;
+                finished(ctx, row.id, DeployStatus::RolledBack, Some(cause.clone()))?;
                 DeployOutcome::RolledBack {
                     failed_at: row.stage,
                     cause,
@@ -97,6 +98,7 @@ pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
                 let cause = format!("reconcile compensation failed: {e:#}");
                 ctx.store
                     .finish_deploy(row.id, DeployStatus::Failed, Some(&cause))?;
+                finished(ctx, row.id, DeployStatus::Failed, Some(cause.clone()))?;
                 DeployOutcome::Failed {
                     failed_at: row.stage,
                     cause,
@@ -682,6 +684,46 @@ mod tests {
             "row finished"
         );
         assert!(store.acquire_lock("web", 999).unwrap(), "lock released");
+    }
+
+    /// A crash-rolled-back deploy must end its timeline explicitly. Nobody is
+    /// subscribed while reconcile runs — it finishes before the listener binds
+    /// — but the stored event is what `/deploy/:id` renders afterwards, and
+    /// what lets the stream for that id close instead of waiting forever.
+    #[tokio::test]
+    async fn reconcile_records_a_terminal_event_for_what_it_rolled_back() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = FakeFileSystem::new();
+        // A crash left an in_progress deploy stuck at Detect, lock held.
+        let id = store.create_deploy("web").unwrap();
+        store.advance_stage(id, Stage::Detect).unwrap();
+        store.acquire_lock("web", id).unwrap();
+
+        let exec = FakeExecutor::new(); // Detect touched nothing, so no host calls
+        let sink = FakeSink::new();
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+            sink: &sink,
+        };
+        reconcile(&ctx).await.unwrap();
+
+        let stored = store.events_for(id).expect("events");
+        let last = stored.last().expect("a terminal event");
+        assert_eq!(
+            last.event.kind,
+            EventKind::Finished {
+                status: DeployStatus::RolledBack
+            }
+        );
+        assert!(
+            last.event.detail.is_some(),
+            "the cause reconcile wrote to the row belongs on the event too"
+        );
     }
 
     #[tokio::test]
