@@ -229,22 +229,31 @@ impl Store {
         Ok(())
     }
 
-    /// Append one event and return the id the store assigned it. That id is
-    /// what the SSE stream deduplicates and resumes on, so it must come from
-    /// the same insert rather than being counted by the caller.
-    pub fn append_event(&self, event: &Event) -> Result<i64> {
+    /// Append one event and return it as stored: the same event, plus the id
+    /// and insert timestamp SQLite assigned. That id is what the SSE stream
+    /// deduplicates and resumes on, so it must come from the same insert
+    /// rather than being counted by the caller — `RETURNING` gets both the id
+    /// and the timestamp in the one round trip that created them.
+    pub fn append_event(&self, event: &Event) -> Result<StoredEvent> {
         let conn = self.conn.lock().expect("store lock");
-        conn.execute(
-            "INSERT INTO events (deploy_id, stage, status, detail) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                event.deploy_id,
-                event.stage.as_str(),
-                event.status.as_str(),
-                event.detail
-            ],
-        )
-        .context("appending event")?;
-        Ok(conn.last_insert_rowid())
+        let (id, at) = conn
+            .query_row(
+                "INSERT INTO events (deploy_id, stage, status, detail)
+                 VALUES (?1, ?2, ?3, ?4) RETURNING id, at",
+                params![
+                    event.deploy_id,
+                    event.stage.as_str(),
+                    event.status.as_str(),
+                    event.detail
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .context("appending event")?;
+        Ok(StoredEvent {
+            id,
+            at,
+            event: event.clone(),
+        })
     }
 
     /// All events for a deploy, in insertion order, each with its id.
@@ -252,7 +261,7 @@ impl Store {
         let conn = self.conn.lock().expect("store lock");
         let mut stmt = conn
             .prepare(
-                "SELECT id, deploy_id, stage, status, detail FROM events
+                "SELECT id, at, deploy_id, stage, status, detail FROM events
                  WHERE deploy_id = ?1 ORDER BY id",
             )
             .context("preparing events query")?;
@@ -307,11 +316,13 @@ fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<StoredEvent>> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
 fn build_event(
     id: i64,
+    at: String,
     deploy_id: i64,
     stage_s: String,
     status_s: String,
@@ -323,6 +334,7 @@ fn build_event(
         .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}"))?;
     Ok(StoredEvent {
         id,
+        at,
         event: Event {
             deploy_id,
             stage,
@@ -552,6 +564,42 @@ mod tests {
         assert_eq!(store.events_for(b).expect("b").len(), 0);
     }
 
+    /// The store fills in `at` on every read; no consumer can show per-stage
+    /// timing if it comes back empty. Exact values are clock-dependent, so
+    /// this only asserts non-emptiness and that ids still ascend.
+    #[test]
+    fn events_carry_a_non_empty_insert_timestamp() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+
+        store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Detect,
+                status: EventStatus::Started,
+                detail: None,
+            })
+            .expect("first");
+        store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Detect,
+                status: EventStatus::Succeeded,
+                detail: None,
+            })
+            .expect("second");
+
+        let events = store.events_for(id).expect("read");
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].at.is_empty(), "at must not be empty");
+        assert!(!events[1].at.is_empty(), "at must not be empty");
+        assert!(
+            events[1].id > events[0].id,
+            "ids must ascend: {:?}",
+            (events[0].id, events[1].id)
+        );
+    }
+
     #[test]
     fn append_event_returns_the_assigned_id() {
         let dir = tempdir().unwrap();
@@ -565,7 +613,8 @@ mod tests {
                 status: EventStatus::Started,
                 detail: None,
             })
-            .expect("append");
+            .expect("append")
+            .id;
         let second = store
             .append_event(&Event {
                 deploy_id: id,
@@ -573,7 +622,8 @@ mod tests {
                 status: EventStatus::Succeeded,
                 detail: None,
             })
-            .expect("append");
+            .expect("append")
+            .id;
 
         assert!(first > 0, "id must be a real rowid, got {first}");
         assert!(
@@ -600,7 +650,8 @@ mod tests {
                         status,
                         detail: None,
                     })
-                    .expect("append"),
+                    .expect("append")
+                    .id,
             );
         }
 
@@ -628,8 +679,8 @@ mod tests {
             status: EventStatus::Started,
             detail: None,
         };
-        let first = store.append_event(&ev(a)).expect("append");
-        let second = store.append_event(&ev(b)).expect("append");
+        let first = store.append_event(&ev(a)).expect("append").id;
+        let second = store.append_event(&ev(b)).expect("append").id;
 
         assert_ne!(first, second);
     }

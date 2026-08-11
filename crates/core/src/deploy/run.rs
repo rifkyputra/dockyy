@@ -11,7 +11,7 @@ use crate::deploy::build::build;
 use crate::deploy::detect::detect;
 use crate::deploy::health::healthcheck;
 use crate::deploy::{Ctx, DeployOutcome, DeployStatus, Stage};
-use crate::events::{Event, EventStatus, StoredEvent};
+use crate::events::{Event, EventStatus};
 use crate::gateway::{apply_route, remove_route};
 use crate::secrets::ensure_all;
 use crate::spec::{slug, WorkloadSpec};
@@ -186,8 +186,8 @@ fn emit(
         status,
         detail,
     };
-    let id = ctx.store.append_event(&event)?;
-    ctx.sink.emit(&StoredEvent { id, event });
+    let stored = ctx.store.append_event(&event)?;
+    ctx.sink.emit(&stored);
     Ok(())
 }
 
@@ -274,7 +274,7 @@ mod tests {
     use super::*;
     use crate::events::fake::FakeSink;
     use crate::events::null::NullSink;
-    use crate::events::EventSink;
+    use crate::events::{EventSink, StoredEvent};
     use crate::exec::fake::FakeExecutor;
     use crate::exec::CommandOutput;
     use crate::fs::fake::FakeFileSystem;
@@ -872,5 +872,49 @@ mod tests {
             .expect("at least one event")
             .event
             .deploy_id
+    }
+
+    /// A sink that asserts, at the moment of `emit`, that the store already
+    /// has the event it was just handed. `every_emitted_event_is_also_durable_with_the_same_id`
+    /// checks the same property after the fact, which would still pass under
+    /// a publish-then-persist ordering — this checks it inline, so it fails
+    /// immediately if the two calls in `emit` (append, then sink.emit) were
+    /// ever swapped.
+    struct AssertingSink<'a> {
+        store: &'a Store,
+    }
+
+    impl EventSink for AssertingSink<'_> {
+        fn emit(&self, event: &StoredEvent) {
+            let durable = self
+                .store
+                .events_for(event.event.deploy_id)
+                .expect("read back events");
+            assert!(
+                durable.iter().any(|e| e.id == event.id),
+                "event {} was published before it was durable",
+                event.id
+            );
+        }
+    }
+
+    /// Pins persist-before-publish as an ordering property, not just a
+    /// same-ids-in-the-end property: the assertion runs inside `emit`, before
+    /// the deploy loop moves on, so it can only pass if the store already has
+    /// the row.
+    #[tokio::test]
+    async fn every_event_is_durable_at_the_moment_it_is_emitted() {
+        let h = harness_ok();
+        let sink = AssertingSink { store: &h.store };
+        let ctx = h.ctx(&sink);
+
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("run");
+        assert!(matches!(outcome, DeployOutcome::Done { .. }), "{outcome:?}");
     }
 }

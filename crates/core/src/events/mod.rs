@@ -1,6 +1,7 @@
 //! Typed deploy events. G1 defines the type and its status; the store persists
-//! them (Task 7). Live emission (a subscriber channel) arrives with the daemon
-//! in phase 3.
+//! them (Task 7). H1 adds live emission: [`EventSink`], the third seam, and
+//! [`StoredEvent`], the read-side event that carries the id and insert time
+//! the store assigned it.
 
 pub mod fake;
 pub mod null;
@@ -55,6 +56,10 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEvent {
     pub id: i64,
+    /// The store's insert timestamp for this row (SQLite `datetime('now')`,
+    /// UTC). Present only on the read side, for the same reason as `id`: a
+    /// write-side [`Event`] has not been inserted yet, so it has no timestamp.
+    pub at: String,
     pub event: Event,
 }
 
@@ -66,9 +71,9 @@ pub struct StoredEvent {
 ///
 /// `emit` returns nothing and is synchronous, both deliberately. A subscriber
 /// that has gone away must not be able to fail a deploy, so there is no error
-/// to propagate; and a sink with no way to await cannot block the deploy loop
-/// on I/O. A sink needing async work should hand off to a channel and do that
-/// work elsewhere.
+/// to propagate; and a sink cannot await, so it cannot suspend the deploy
+/// loop. It must also not block, either — a sink needing I/O hands off to a
+/// channel and does that work in its own task.
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: &StoredEvent);
 }
@@ -108,6 +113,7 @@ mod tests {
     fn stored(id: i64, stage: Stage, status: EventStatus) -> StoredEvent {
         StoredEvent {
             id,
+            at: "2026-01-01 00:00:00".into(),
             event: Event {
                 deploy_id: 1,
                 stage,
