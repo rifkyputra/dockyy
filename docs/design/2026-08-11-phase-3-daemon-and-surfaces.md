@@ -70,15 +70,20 @@ the daemon.
 ### The third seam
 
 ```rust
-#[async_trait]
 pub trait EventSink: Send + Sync {
-    async fn emit(&self, event: &Event);
+    fn emit(&self, event: &StoredEvent);
 }
 ```
 
-`emit` returns nothing. A subscriber that has gone away must not be able to fail a deploy, so there
-is no error to propagate and no value to ignore — the signature carries the guarantee instead of a
-comment asking for it.
+`emit` returns nothing and is synchronous. A subscriber that has gone away must not be able to fail
+a deploy, so there is no error to propagate; and a sink with no way to await cannot block the deploy
+loop on I/O. The signature carries both guarantees instead of a comment asking for them. A sink
+needing async work — the H7 webhook — subscribes to the broadcast channel and does that work in its
+own task.
+
+Events reach a sink as `StoredEvent { id, event }` rather than as an `Event` carrying its own id.
+An id only exists after the insert, so a type that carries one cannot be built before persisting:
+persist-before-publish becomes a property of the types rather than a rule to remember.
 
 `Ctx` gains a fourth field. `deploy::run` calls `ctx.sink.emit(&event)` immediately after each
 existing `append_event`. **Persist first, then publish**: the durable record is what the API serves
@@ -99,10 +104,10 @@ dependency and no `host` parameter.
 
 ### What changes in `core`
 
-- `events::EventSink` + `NullSink` + `FakeSink`
-- `Event` gains `id: i64`; `store::events_for` returns it, and `append_event` returns the assigned
-  id. **The column already exists** (`events.id INTEGER PRIMARY KEY AUTOINCREMENT`) — this is an API
-  exposure change, not a schema change.
+- `events`: `StoredEvent { id, event }`, the `EventSink` trait, `NullSink`, `FakeSink`.
+  `store::append_event` returns the assigned id and `events_for` returns `StoredEvent`. **The column
+  already exists** (`events.id INTEGER PRIMARY KEY AUTOINCREMENT`) — this is an API exposure change,
+  not a schema change.
 - `store`: `apps` gains `repo_path TEXT` and `route TEXT`, both nullable, with
   `register_app`/`app_row` accessors. See Migration below.
 - `logs`: a new module, `tail(exec, unit, n)` and `search(exec, unit, pattern)` over the existing

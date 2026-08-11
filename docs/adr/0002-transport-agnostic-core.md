@@ -79,6 +79,12 @@ The invariant, stated so violations are obvious in review:
      kuadrat's own state, which stays wherever kuadrat runs, not on the managed
      host a remote executor would reach. It is the one sanctioned direct
      filesystem touch outside `fs::local`.
+  4. `EventSink` is the third seam. Publishing an event to a subscriber is a side effect leaving
+     `core`, so it goes through a trait rather than a channel type baked into a module — which is what
+     keeps `tokio::sync::broadcast` a *daemon* dependency rather than a `core` one. `emit` is
+     synchronous and returns nothing: a subscriber that has gone away must not be able to fail a
+     deploy, and a sink with no way to await cannot block the deploy loop on I/O. A sink that needs
+     async work hands off to a channel and does that work in its own task.
 
   Outside `kuadrat-core` the rule does not apply: the CLI reading a spec file off the
   operator's own disk is not a host interaction.

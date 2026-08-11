@@ -3,6 +3,14 @@
 Carried forward from the phase-1 whole-branch review and its fix wave. Each entry is real, judged
 deferrable at the time, and worth re-reading before the phase it names.
 
+## From H1 — `reconcile` emits no events
+
+`deploy::reconcile` rolls back crashed deploys and calls `finish_deploy`, but appends no events, so
+a reconciled rollback is invisible to a subscriber. That is unchanged from phase 2 — reconcile never
+emitted events — and H1 deliberately did not add them, because a watcher can only exist while the
+daemon is running and reconcile runs before it binds. Revisit in H4 if the UI should show "this was
+rolled back by a crash recovery" rather than only the terminal status.
+
 ## From G5 — a per-row store error aborts the whole reconcile batch
 
 `deploy::reconcile` `?`-propagates store errors (`load_previous`/`finish_deploy`/`release_lock`) per
