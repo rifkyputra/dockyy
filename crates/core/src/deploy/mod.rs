@@ -108,6 +108,7 @@ pub mod detect;
 pub mod health;
 mod run;
 
+pub use run::reconcile;
 pub use run::run;
 
 #[cfg(test)]

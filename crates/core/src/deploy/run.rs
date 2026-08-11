@@ -14,7 +14,7 @@ use crate::deploy::{Ctx, DeployOutcome, DeployStatus, Stage};
 use crate::events::{Event, EventStatus};
 use crate::gateway::{apply_route, remove_route};
 use crate::secrets::ensure_all;
-use crate::spec::WorkloadSpec;
+use crate::spec::{slug, WorkloadSpec};
 use crate::workloads::apply::{apply, remove};
 
 /// Deploy `spec` from the repo at `repo`. Returns the terminal outcome
@@ -41,6 +41,50 @@ pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<Deplo
     let result = run_stages(ctx, spec, repo, &slug, deploy_id, &previous).await;
     ctx.store.release_lock(&name)?;
     result
+}
+
+/// Recover from crashed deploys. For every deploy still `in_progress` (a crash
+/// left it un-finished with its lock held), roll it back to the last-good state
+/// using the same compensation the driver uses, then release its lock. Returns
+/// one outcome per reconciled deploy. Safe to call on every startup — a no-op
+/// when nothing is in progress.
+pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
+    let mut outcomes = Vec::new();
+
+    for row in ctx.store.in_progress_deploys()? {
+        let previous = load_previous(ctx, &row.app)?;
+        let app_slug = slug(&row.app);
+
+        let outcome = match compensate(ctx, &row.app, &app_slug, &previous, row.stage).await {
+            Ok(()) => {
+                let cause = format!(
+                    "reconciled after restart (was in progress at {:?})",
+                    row.stage
+                );
+                ctx.store
+                    .finish_deploy(row.id, DeployStatus::RolledBack, Some(&cause))?;
+                DeployOutcome::RolledBack {
+                    failed_at: row.stage,
+                    cause,
+                }
+            }
+            Err(e) => {
+                let cause = format!("reconcile compensation failed: {e:#}");
+                ctx.store
+                    .finish_deploy(row.id, DeployStatus::Failed, Some(&cause))?;
+                DeployOutcome::Failed {
+                    failed_at: row.stage,
+                    cause,
+                }
+            }
+        };
+
+        // The deploy is terminally finished either way — release its lock.
+        ctx.store.release_lock(&row.app)?;
+        outcomes.push(outcome);
+    }
+
+    Ok(outcomes)
 }
 
 fn load_previous(ctx: &Ctx<'_>, name: &str) -> Result<Option<WorkloadSpec>> {
@@ -460,6 +504,127 @@ mod tests {
             }
         }
         // Even here the lock is released.
+        assert!(store.acquire_lock("web", 999).unwrap());
+    }
+
+    #[tokio::test]
+    async fn reconcile_is_a_noop_when_nothing_is_in_progress() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = FakeFileSystem::new();
+        let exec = FakeExecutor::new();
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        assert!(reconcile(&ctx).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_rolls_back_a_crash_at_detect_with_no_host_changes() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = FakeFileSystem::new();
+        // A crash left an in_progress deploy stuck at Detect, lock held.
+        let id = store.create_deploy("web").unwrap();
+        store.advance_stage(id, Stage::Detect).unwrap();
+        store.acquire_lock("web", id).unwrap();
+
+        let exec = FakeExecutor::new(); // Detect touched nothing, so no host calls
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcomes = reconcile(&ctx).await.unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0],
+            DeployOutcome::RolledBack {
+                failed_at: Stage::Detect,
+                ..
+            }
+        ));
+        assert!(
+            store.in_progress_deploys().unwrap().is_empty(),
+            "row finished"
+        );
+        assert!(store.acquire_lock("web", 999).unwrap(), "lock released");
+    }
+
+    #[tokio::test]
+    async fn reconcile_restores_the_previous_spec_after_a_crash_at_apply() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = FakeFileSystem::new();
+        // A prior successful deploy stored a spec.
+        let prev = WorkloadSpec::new("web", "old:1");
+        store
+            .put_spec("web", "web", &serde_json::to_string(&prev).unwrap())
+            .unwrap();
+        // The next deploy crashed at Apply.
+        let id = store.create_deploy("web").unwrap();
+        store.advance_stage(id, Stage::Apply).unwrap();
+        store.acquire_lock("web", id).unwrap();
+
+        // Reconcile re-applies the previous spec: daemon-reload + start.
+        let exec = FakeExecutor::new();
+        exec.expect_call("systemctl", &["daemon-reload"], out(0, "", ""));
+        exec.expect_call("systemctl", &["start", "kuadrat-web"], out(0, "", ""));
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcomes = reconcile(&ctx).await.unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            DeployOutcome::RolledBack {
+                failed_at: Stage::Apply,
+                ..
+            }
+        ));
+        assert!(store.in_progress_deploys().unwrap().is_empty());
+        assert!(store.acquire_lock("web", 999).unwrap());
+    }
+
+    #[tokio::test]
+    async fn reconcile_removes_a_partial_unit_from_a_crashed_first_deploy() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = FakeFileSystem::new();
+        // The crashed first deploy wrote a marker-owned unit before dying at Apply.
+        let unit = paths.quadlet_dir.join("kuadrat-web.container");
+        fsys.insert(&unit, "# kuadrat-managed: true\n[Container]\nImage=x\n");
+        let id = store.create_deploy("web").unwrap();
+        store.advance_stage(id, Stage::Apply).unwrap();
+        store.acquire_lock("web", id).unwrap();
+        // No previous spec → reconcile removes the unit: stop + daemon-reload.
+        let exec = FakeExecutor::new();
+        exec.expect_call("systemctl", &["stop", "kuadrat-web"], out(0, "", ""));
+        exec.expect_call("systemctl", &["daemon-reload"], out(0, "", ""));
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcomes = reconcile(&ctx).await.unwrap();
+
+        assert!(matches!(outcomes[0], DeployOutcome::RolledBack { .. }));
+        assert!(fsys.contents(&unit).is_none(), "partial unit removed");
         assert!(store.acquire_lock("web", 999).unwrap());
     }
 
