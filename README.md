@@ -21,6 +21,38 @@ single place to see status and logs, and no agent-operable interface.
 kuadrat is that layer. systemd stays the supervisor; kuadrat is the thing that puts workloads
 in front of it.
 
+### Measured
+
+The daemon claim above is testable, so [`examples/`](examples/) ships the same app twice — once
+as a kuadrat deployment, once as a Docker Compose service, with a **byte-identical** `app.py` and
+base image — plus [`examples/bench.py`](examples/bench.py) to measure both.
+
+Supervisor processes only, not the app itself. Ubuntu 24.04, 2 cores, Docker 29.1.3 vs
+Podman 4.9.3:
+
+| | Docker | kuadrat |
+|---|---|---|
+| **Fixed** — before any container exists | `dockerd` 88.8 MB + `containerd` 51.5 MB = **140.3 MB** | **0** — systemd is already running |
+| **Marginal** — per container | `containerd-shim` 10.4 + 2× `docker-proxy` 8.9 = **19.3 MB** | `conmon` **2.5 MB** |
+| **Ten containers** | **334 MB** | **25 MB** |
+
+**7.8× per container**, and Docker pays the 140 MB before the first one starts. On a 1 GB VPS
+that fixed cost alone is 14% of the machine. Docker runs *two* `docker-proxy` processes per
+published port — one per address family — while `conmon` is the only per-container process on the
+Quadlet side, because systemd is the supervisor and it is running regardless.
+
+**Throughput showed no difference, and that is the honest result.** One run suggested kuadrat was
+faster; it did not reproduce, and bypassing `docker-proxy` by hitting the container IP directly was
+no faster than going through it — ruling out the obvious explanation. Both runtimes start the same
+process under the same kernel. Anyone quoting a throughput win here is quoting noise.
+
+Two caveats before citing these figures: memory is **RSS, not PSS** (`smaps_rollup` is unreadable
+for root-owned processes without `sudo`), which double-counts shared pages and therefore *inflates*
+the multi-process side — the direction is not in doubt but the ratio would shrink. And the host was
+already running ~16 other Docker containers, so `dockerd`'s working set is fatter than a clean
+host's; the marginal figures are matched by container id and port and are unaffected. Full method
+and caveats in [`examples/hello-py-docker/README.md`](examples/hello-py-docker/README.md).
+
 ## What it does
 
 ```
@@ -234,6 +266,8 @@ job via SSH tunnel or VPN.
 |---|---|
 | [Phase 1 design](docs/design/2026-08-10-design.md) | Architecture, components, data flow, error handling, testing |
 | [Phase 2 design](docs/design/2026-08-10-phase-2-deploy-loop.md) | The deploy loop: state machine, gateway, secrets, store, events |
+| [Phase 3 design](docs/design/2026-08-11-phase-3-daemon-and-surfaces.md) | The daemon: HTTP API, SSE, htmx UI, logs, webhook |
+| [Examples](examples/) | A runnable app, its Docker equivalent, and the runtime benchmark |
 | [Plans](docs/plans/) | Per-gate implementation plans, task by task |
 | [Known gaps](docs/known-gaps.md) | Deferred findings, acceptance records, what to re-read before which phase |
 | [ADRs](docs/adr/) | Decisions and their reasoning |
