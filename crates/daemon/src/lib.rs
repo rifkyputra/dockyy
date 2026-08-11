@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use kuadrat_core::deploy::reconcile;
-use kuadrat_core::events::null::NullSink;
 use kuadrat_core::exec::local::LocalExecutor;
 use kuadrat_core::fs::local::LocalFileSystem;
 use kuadrat_core::store::Store;
@@ -42,7 +41,6 @@ pub async fn serve(config: Config) -> Result<()> {
     let state = AppState::new(
         Arc::new(LocalExecutor),
         Arc::new(LocalFileSystem),
-        Arc::new(NullSink),
         store,
         paths,
     );

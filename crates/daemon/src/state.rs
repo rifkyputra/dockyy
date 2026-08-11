@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use kuadrat_core::events::EventSink;
 use kuadrat_core::exec::Executor;
 use kuadrat_core::fs::FileSystem;
 use kuadrat_core::spec::WorkloadSpec;
@@ -12,13 +11,18 @@ use kuadrat_core::store::{AppConfig, Store};
 use kuadrat_core::workloads::paths::Paths;
 use tokio::sync::Semaphore;
 
+use crate::hub::BroadcastSink;
+
 /// Everything a handler needs. Cloned per request; every field is an `Arc` or
 /// a cheap value, so cloning costs nothing.
 #[derive(Clone)]
 pub struct AppState {
     pub exec: Arc<dyn Executor>,
     pub fsys: Arc<dyn FileSystem>,
-    pub sink: Arc<dyn EventSink>,
+    /// The one hub. It is what `ctx()` hands `core` as the event sink *and*
+    /// what every stream subscribes to — one object, so a deploy's events and
+    /// a viewer's subscription cannot end up on different channels.
+    pub hub: Arc<BroadcastSink>,
     pub store: Arc<Store>,
     pub paths: Paths,
     /// One permit, globally: one deploy at a time.
@@ -34,14 +38,13 @@ impl AppState {
     pub fn new(
         exec: Arc<dyn Executor>,
         fsys: Arc<dyn FileSystem>,
-        sink: Arc<dyn EventSink>,
         store: Arc<Store>,
         paths: Paths,
     ) -> Self {
         Self {
             exec,
             fsys,
-            sink,
+            hub: Arc::new(BroadcastSink::new()),
             store,
             paths,
             deploy_slot: Arc::new(Semaphore::new(1)),

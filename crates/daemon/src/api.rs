@@ -1,18 +1,23 @@
 //! The JSON API. Every handler is a thin shell over `core`; nothing here
 //! decides anything the CLI would decide differently.
 
+use std::convert::Infallible;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
-use kuadrat_core::events::StoredEvent;
+use futures_core::Stream;
+use kuadrat_core::deploy::{reserve, run_reserved, Ctx, DeployStatus};
+use kuadrat_core::events::{EventKind, StoredEvent};
 use kuadrat_core::logs::tail;
 use kuadrat_core::spec::Route;
 use kuadrat_core::store::AppConfig;
 use kuadrat_core::workloads::query::status;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::state::{spec_for, AppState};
 
@@ -23,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/:name/deploy", post(deploy))
         .route("/api/apps/:name/logs", get(logs))
         .route("/api/deploys/:id", get(get_deploy))
+        .route("/api/deploys/:id/events", get(deploy_events))
         .with_state(state)
 }
 
@@ -279,6 +285,128 @@ async fn get_deploy(
     }))
 }
 
+/// One deploy's events: the stored backlog, then everything that happens
+/// after, closing when the deploy ends.
+///
+/// **The subscribe happens before the backlog read, and the order is
+/// load-bearing.** An event landing between the read and the subscribe would
+/// be lost permanently, and it is exactly the stage transition the viewer is
+/// waiting for. Subscribing first turns that loss into a duplicate, and the
+/// `id > last_sent` filter drops duplicates. A duplicate is recoverable; a gap
+/// is not.
+async fn deploy_events(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    // 404 before a stream is opened. An unknown id must fail as a request —
+    // a stream that opens and then says nothing is indistinguishable, to a
+    // browser, from a deploy that is simply slow.
+    let row = st
+        .store
+        .deploy(id)
+        .map_err(|e| ApiError::internal(format!("reading deploy {id}: {e:#}")))?
+        .ok_or_else(|| ApiError::not_found(format!("no deploy {id}")))?;
+
+    let mut rx = st.hub.subscribe();
+
+    let backlog = st
+        .store
+        .events_for(id)
+        .map_err(|e| ApiError::internal(format!("reading events for {id}: {e:#}")))?;
+
+    let already_terminal = row.status != DeployStatus::InProgress;
+
+    // The recovery path re-reads SQLite from inside the stream, which outlives
+    // the borrow of `st`.
+    let store = st.store.clone();
+
+    let stream = async_stream::stream! {
+        let mut last_sent = 0i64;
+        let mut ended = false;
+
+        for ev in backlog {
+            last_sent = ev.id;
+            ended = is_finished(&ev);
+            yield Ok(sse_event(&ev));
+        }
+
+        // Nothing more can arrive for a deploy that has already ended. The
+        // second half of the condition covers a deploy finished by a path that
+        // emits no event — `reserve` rejecting a duplicate leaves a terminal
+        // row with an empty log — where waiting for a terminal event would
+        // mean waiting forever.
+        if ended || already_terminal {
+            return;
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if ev.event.deploy_id != id || ev.id <= last_sent {
+                        continue;
+                    }
+                    last_sent = ev.id;
+                    let ends_here = is_finished(&ev);
+                    yield Ok(sse_event(&ev));
+                    if ends_here {
+                        return;
+                    }
+                }
+                // The slow-receiver case, and the failure mode the design
+                // singles out as most likely to be got wrong. Treating it as
+                // fatal closes a viewer's stream mid-deploy; ignoring it
+                // silently skips stages. The dropped events are still in
+                // SQLite — they were persisted before they were published — so
+                // re-read from the last id sent and resume. This is the same
+                // path a reconnection takes.
+                Err(RecvError::Lagged(_)) => {
+                    let missed = match store.events_for(id) {
+                        Ok(evs) => evs,
+                        // The store is unreadable; ending the stream is the
+                        // honest answer, and the browser will reconnect.
+                        Err(_) => return,
+                    };
+                    for ev in missed {
+                        if ev.id <= last_sent {
+                            continue;
+                        }
+                        last_sent = ev.id;
+                        let ends_here = is_finished(&ev);
+                        yield Ok(sse_event(&ev));
+                        if ends_here {
+                            return;
+                        }
+                    }
+                }
+                // Every sender is gone: the daemon is shutting down.
+                Err(RecvError::Closed) => return,
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn is_finished(ev: &StoredEvent) -> bool {
+    matches!(ev.event.kind, EventKind::Finished { .. })
+}
+
+/// One event on the wire.
+///
+/// The SSE `id` is the store's id, which is what makes `Last-Event-ID`
+/// resumption work without the handler keeping any per-connection state. The
+/// payload is the same `EventOut` the JSON API returns, so a page renders a
+/// streamed event and a fetched one through one code path.
+fn sse_event(ev: &StoredEvent) -> sse::Event {
+    let out = EventOut::from(ev.clone());
+    let id = out.id.to_string();
+    sse::Event::default()
+        .id(id)
+        // `EventOut` is five owned scalars; serialization cannot fail.
+        .json_data(&out)
+        .expect("EventOut serializes")
+}
+
 // ------------------------------------------------------------------- helpers
 
 fn registration(st: &AppState, name: &str) -> ApiResult<AppConfig> {
@@ -313,7 +441,7 @@ impl AppState {
             fsys: &*self.fsys,
             store: &self.store,
             paths: &self.paths,
-            sink: &*self.sink,
+            sink: &*self.hub,
         }
     }
 }
@@ -321,9 +449,11 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub::BroadcastSink;
     use axum::body::Body;
     use axum::http::Request;
-    use kuadrat_core::events::fake::FakeSink;
+    use kuadrat_core::deploy::Stage;
+    use kuadrat_core::events::{Event, EventSink, EventStatus};
     use kuadrat_core::exec::fake::FakeExecutor;
     use kuadrat_core::exec::CommandOutput;
     use kuadrat_core::fs::fake::FakeFileSystem;
@@ -343,19 +473,29 @@ mod tests {
 
     /// A router over fakes and a temp-file store. No socket is bound and no
     /// podman is required, so these run anywhere the unit tests do.
-    fn harness() -> (Router, Arc<Store>, TempDir) {
+    fn harness_parts() -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        harness_with_capacity(256)
+    }
+
+    fn harness_with_capacity(capacity: usize) -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(Store::open(&dir.path().join("k.db")).expect("store"));
         let exec = FakeExecutor::new();
         exec.expect("systemctl", ok());
-        let state = AppState::new(
+        let mut state = AppState::new(
             Arc::new(exec),
             Arc::new(FakeFileSystem::new()),
-            Arc::new(FakeSink::new()),
             store.clone(),
             Paths::rooted(dir.path()),
         );
-        (router(state), store, dir)
+        state.hub = Arc::new(BroadcastSink::with_capacity(capacity));
+        let hub = state.hub.clone();
+        (router(state), store, hub, dir)
+    }
+
+    fn harness() -> (Router, Arc<Store>, TempDir) {
+        let (app, store, _hub, dir) = harness_parts();
+        (app, store, dir)
     }
 
     fn get(path: &str) -> Request<Body> {
@@ -530,7 +670,6 @@ mod tests {
         let state = AppState::new(
             Arc::new(exec),
             Arc::new(FakeFileSystem::new()),
-            Arc::new(FakeSink::new()),
             store,
             Paths::rooted(dir.path()),
         );
@@ -558,9 +697,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deploy_is_readable_with_its_events() {
-        use kuadrat_core::deploy::Stage;
-        use kuadrat_core::events::{Event, EventStatus};
-
         let (app, store, _d) = harness();
         let id = store.create_deploy("web").expect("create");
         store
@@ -582,5 +718,228 @@ mod tests {
         assert_eq!(body["app"], "web");
         assert_eq!(body["events"][0]["stage"], "build");
         assert_eq!(body["events"][0]["status"], "started");
+    }
+
+    /// Read an SSE body to completion and return the `data:` payloads. This
+    /// only terminates because the stream closes on the terminal event — which
+    /// is the property being tested as much as the contents are.
+    async fn sse_data(res: Response) -> Vec<serde_json::Value> {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        String::from_utf8(bytes.to_vec())
+            .expect("utf8")
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .map(|d| serde_json::from_str(d).expect("json"))
+            .collect()
+    }
+
+    fn stage_event(store: &Store, id: i64, stage: Stage, status: EventStatus) {
+        store
+            .append_event(&Event::for_stage(id, stage, status, None))
+            .expect("append");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_deploy_is_a_404_rather_than_an_empty_stream() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let res = app
+            .oneshot(get("/api/deploys/99/events"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A deploy that ended before anyone connected: the whole story is in the
+    /// backlog, and the stream must close rather than wait for events that can
+    /// never come.
+    #[tokio::test]
+    async fn a_finished_deploy_streams_its_backlog_and_closes() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        stage_event(&store, id, Stage::Detect, EventStatus::Started);
+        stage_event(&store, id, Stage::Detect, EventStatus::Succeeded);
+        store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let data = sse_data(res).await;
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0]["stage"], "detect");
+        assert_eq!(data[2]["stage"], "deploy");
+        assert_eq!(data[2]["status"], "done");
+    }
+
+    /// A deploy terminated by a path that emits no event — `reserve` rejecting
+    /// a duplicate — has a terminal row and an empty log. Without the row
+    /// check the stream would wait forever on a deploy that can never speak.
+    #[tokio::test]
+    async fn a_terminal_deploy_with_no_events_closes_immediately() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .finish_deploy(id, DeployStatus::Failed, Some("rejected"))
+            .expect("finish");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+        assert!(sse_data(res).await.is_empty());
+    }
+
+    /// Backlog then live, in order and without a gap — the first of the three
+    /// cases the design names.
+    #[tokio::test]
+    async fn the_backlog_is_followed_by_live_events_in_order() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        stage_event(&store, id, Stage::Detect, EventStatus::Started);
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+
+        // Emitted after the handler has read its backlog and subscribed, so
+        // these arrive over the channel rather than from SQLite.
+        let live = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        hub.emit(&live);
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let data = sse_data(res).await;
+        let stages: Vec<&str> = data
+            .iter()
+            .map(|d| d["stage"].as_str().expect("stage"))
+            .collect();
+        assert_eq!(stages, ["detect", "build", "deploy"]);
+    }
+
+    /// An event delivered both ways at the join is sent once — the second of
+    /// the design's three cases. The handler subscribes before reading, so an
+    /// event already in the backlog can also arrive live; the id filter is
+    /// what makes that harmless.
+    #[tokio::test]
+    async fn an_event_in_both_the_backlog_and_the_channel_is_sent_once() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        let dup = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+
+        hub.emit(&dup); // the same event, arriving live
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let data = sse_data(res).await;
+        assert_eq!(data.len(), 2, "the duplicate must be dropped: {data:?}");
+    }
+
+    /// Two deploys share one hub. A stream must not leak another deploy's
+    /// events into this one's timeline.
+    #[tokio::test]
+    async fn another_deploys_events_are_not_forwarded() {
+        let (app, store, hub, _d) = harness_parts();
+        let mine = store.create_deploy("web").expect("create");
+        let other = store.create_deploy("api").expect("create");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{mine}/events")))
+            .await
+            .expect("send");
+
+        let theirs = store
+            .append_event(&Event::for_stage(
+                other,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        hub.emit(&theirs);
+        let end = store
+            .append_event(&Event::finished(mine, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let data = sse_data(res).await;
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["stage"], "deploy");
+    }
+
+    /// The third of the design's three cases. A viewer whose connection is
+    /// slower than the deploy loses messages from the channel — but not from
+    /// SQLite, because events are persisted before they are published. The
+    /// stream must re-read and carry on, not close and not skip.
+    #[tokio::test]
+    async fn a_lagged_subscriber_recovers_every_missed_event_from_the_store() {
+        let (app, store, hub, _d) = harness_with_capacity(2);
+        let id = store.create_deploy("web").expect("create");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+
+        // Six events into a two-slot channel, with nobody polling the body
+        // yet: the receiver is guaranteed to be told it lagged.
+        for (stage, status) in [
+            (Stage::Detect, EventStatus::Started),
+            (Stage::Detect, EventStatus::Succeeded),
+            (Stage::Build, EventStatus::Started),
+            (Stage::Build, EventStatus::Succeeded),
+            (Stage::Apply, EventStatus::Started),
+            (Stage::Apply, EventStatus::Succeeded),
+        ] {
+            let ev = store
+                .append_event(&Event::for_stage(id, stage, status, None))
+                .expect("append");
+            hub.emit(&ev);
+        }
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let data = sse_data(res).await;
+        let ids: Vec<i64> = data.iter().map(|d| d["id"].as_i64().expect("id")).collect();
+        assert_eq!(ids.len(), 7, "nothing may be skipped: {data:?}");
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "ids must ascend: {ids:?}"
+        );
+        assert_eq!(data[6]["stage"], "deploy");
     }
 }
