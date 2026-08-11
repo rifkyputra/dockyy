@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod config;
+pub mod hub;
 pub mod state;
 
 use std::sync::Arc;
