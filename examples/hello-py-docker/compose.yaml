@@ -1,0 +1,16 @@
+# The Docker-native equivalent of examples/hello-py/kuadrat.json.
+#
+# Same image, same limit, same env. Published on 7655 so it can run beside the
+# kuadrat deployment on 7654 during a benchmark; the in-container port is 7654
+# in both, so the app itself is unchanged.
+services:
+  hello:
+    build: .
+    image: hello-py-docker:bench
+    container_name: hello-docker
+    ports:
+      - "7655:7654"
+    environment:
+      GREETING: "hello from docker"
+    mem_limit: 128m
+    restart: unless-stopped
