@@ -95,13 +95,17 @@ pub async fn index(State(st): State<AppState>) -> Markup {
 /// An app's detail page at `GET /app/:name`: status, route, image, its
 /// `RECENT_DEPLOYS` most recent deploys, and a `LOG_LINES`-line log tail.
 ///
-/// A registration that fails to read is treated the same as one that does
-/// not exist — both send the operator to the 404 rather than a 500, matching
-/// `index`'s bias toward failing thin rather than failing closed.
+/// A registration that genuinely does not exist and one this handler failed
+/// to read are kept apart on purpose: they send the operator in different
+/// directions. "No such app" says check the spelling, or re-register it. A
+/// store read failure says check the disk, or the database — `index`'s
+/// fail-thin bias does not carry over here, because there the two cases both
+/// mean "nothing to click into right now" and here they do not.
 pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) -> Response {
     let config = match st.store.app_config(&name) {
         Ok(Some(c)) => c,
-        Ok(None) | Err(_) => return not_found("app"),
+        Ok(None) => return not_found("app"),
+        Err(e) => return store_unavailable("the registration", e),
     };
 
     let status_label = match status(&*st.exec, &*st.fsys, &st.paths, &name).await {
@@ -212,4 +216,16 @@ pub fn not_found(what: &str) -> Response {
         p { "No such " (what) "." }
     };
     (StatusCode::NOT_FOUND, layout("not found", body)).into_response()
+}
+
+/// A store read that failed outright, distinct from `not_found`: this is not
+/// "no such app", it is "could not find out". Named after what could not be
+/// read so the operator knows what to go check, the same shape the log
+/// section already uses for an unreadable journal.
+fn store_unavailable(what: &str, e: anyhow::Error) -> Response {
+    let body = html! {
+        h1 { "Could not read " (what) }
+        p id="store-error" { "The store could not be read: " (format!("{e:#}")) }
+    };
+    (StatusCode::INTERNAL_SERVER_ERROR, layout("error", body)).into_response()
 }

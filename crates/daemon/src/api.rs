@@ -1208,5 +1208,60 @@ pub(crate) mod tests {
 
         let res = app.oneshot(get("/app/web")).await.expect("send");
         assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        assert!(
+            !body.contains(r#"id="deploy-history""#),
+            "the history table rendered with no deploys to show: {body}"
+        );
+        assert!(
+            body.to_lowercase().contains("no deploys yet"),
+            "expected a note explaining the missing history: {body}"
+        );
+    }
+
+    /// "No such app" and "could not read the registration" send the operator
+    /// in opposite directions — one says check the spelling, the other says
+    /// check the store — so a store failure must not render as the 404.
+    #[tokio::test]
+    async fn a_store_error_reading_the_registration_is_not_rendered_as_a_404() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("k.db");
+        let store = Arc::new(Store::open(&db_path).expect("store"));
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: None,
+            })
+            .expect("register");
+
+        // A second raw connection to the same file, dropping the table
+        // `app_config` reads from out from under the live `Store` — the same
+        // raw-connection trick `kuadrat_core`'s own store tests already use to
+        // simulate a broken schema, not a new dependency in the tree.
+        {
+            let raw = rusqlite::Connection::open(&db_path).expect("raw open");
+            raw.execute("DROP TABLE app_config", [])
+                .expect("drop table");
+        }
+
+        let exec = FakeExecutor::new();
+        exec.expect("systemctl", ok());
+        let mut state = AppState::new(
+            Arc::new(exec),
+            Arc::new(FakeFileSystem::new()),
+            store,
+            Paths::rooted(dir.path()),
+        );
+        state.hub = Arc::new(BroadcastSink::with_capacity(256));
+        let app = router(state);
+
+        let res = app.oneshot(get("/app/web")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(res).await;
+        assert!(
+            !body.to_lowercase().contains("no such app"),
+            "a store error rendered as the 404 page: {body}"
+        );
     }
 }

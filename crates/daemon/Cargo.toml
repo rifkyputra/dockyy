@@ -18,3 +18,7 @@ maud = { version = "0.26", features = ["axum"] }
 [dev-dependencies]
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+# Already a workspace dependency of kuadrat-core (its own tests use the same
+# raw-connection trick to simulate a broken schema) — reused here to break the
+# store out from under a live `Store`, not a new crate in the dependency tree.
+rusqlite.workspace = true
