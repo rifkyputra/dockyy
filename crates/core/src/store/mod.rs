@@ -300,6 +300,12 @@ impl Store {
     /// second share a timestamp and would order arbitrarily.
     pub fn recent_deploys(&self, app: &str, limit: usize) -> Result<Vec<DeployRow>> {
         let conn = self.conn.lock().expect("store lock");
+        // Saturating, not `as`: `limit as i64` wraps a `usize` above `i64::MAX`
+        // to a negative number, and SQLite reads a negative LIMIT as *no* limit —
+        // so the value that most obviously means "everything" would be the one
+        // that silently removes the bound. Bounded reads are a rule here, not a
+        // preference; `logs::tail` clamps its line count for the same reason.
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = conn
             .prepare(
                 "SELECT id, app, stage, status, detail FROM deploys
@@ -307,7 +313,7 @@ impl Store {
             )
             .context("preparing recent deploys query")?;
         let rows = stmt
-            .query_map(params![app, limit as i64], deploy_row)
+            .query_map(params![app, limit], deploy_row)
             .context("querying recent deploys")?;
 
         let mut out = Vec::new();
@@ -1495,5 +1501,24 @@ mod tests {
             .recent_deploys("nothing", 10)
             .expect("read")
             .is_empty());
+    }
+
+    /// `usize::MAX` is what a caller writes when it means "no ceiling". It must
+    /// not reach SQLite as a negative LIMIT, which would mean the same thing by
+    /// accident — and would be the one call that escapes the bound.
+    ///
+    /// Note: this test cannot prove the clamp itself, because a negative LIMIT
+    /// returns everything and there are only three rows. It proves the call is
+    /// well-formed and does not error when given an enormous limit.
+    #[test]
+    fn an_enormous_limit_is_clamped_rather_than_wrapping_negative() {
+        let (_dir, store) = open_temp();
+        for _ in 0..3 {
+            store.create_deploy("web").expect("create");
+        }
+        assert_eq!(
+            store.recent_deploys("web", usize::MAX).expect("read").len(),
+            3
+        );
     }
 }
