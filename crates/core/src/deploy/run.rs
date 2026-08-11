@@ -86,8 +86,6 @@ pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
                     "reconciled after restart (was in progress at {:?})",
                     row.stage
                 );
-                ctx.store
-                    .finish_deploy(row.id, DeployStatus::RolledBack, Some(&cause))?;
                 finished(ctx, row.id, DeployStatus::RolledBack, Some(cause.clone()))?;
                 DeployOutcome::RolledBack {
                     failed_at: row.stage,
@@ -96,8 +94,6 @@ pub async fn reconcile(ctx: &Ctx<'_>) -> Result<Vec<DeployOutcome>> {
             }
             Err(e) => {
                 let cause = format!("reconcile compensation failed: {e:#}");
-                ctx.store
-                    .finish_deploy(row.id, DeployStatus::Failed, Some(&cause))?;
                 finished(ctx, row.id, DeployStatus::Failed, Some(cause.clone()))?;
                 DeployOutcome::Failed {
                     failed_at: row.stage,
@@ -178,8 +174,6 @@ async fn run_stages(
 
     let json = serde_json::to_string(&spec).context("serializing the deployed spec")?;
     ctx.store.put_spec(&spec.name, slug, &json)?;
-    ctx.store
-        .finish_deploy(deploy_id, DeployStatus::Done, None)?;
     finished(ctx, deploy_id, DeployStatus::Done, None)?;
     Ok(DeployOutcome::Done { image })
 }
@@ -214,12 +208,18 @@ fn emit(
     Ok(())
 }
 
-/// Persist and publish the deploy-level terminal event.
+/// Persist the deploy-level terminal status and its event as one atomic
+/// write, then publish it.
 ///
-/// Called immediately after `finish_deploy`, never before: the durable status
-/// must be written before anyone can be told the deploy ended, for the same
-/// reason `emit` persists before publishing. A subscriber that saw "finished"
-/// and then read a row still saying `in_progress` would be reading a lie.
+/// Uses `Store::finish_deploy_with_event` rather than a separate
+/// `finish_deploy` followed by `append_event`: the SSE handler reads the
+/// `deploys` row and the event backlog as two separate queries, so two
+/// separate writes leave a window where a reader can see the row already
+/// terminal but the backlog not yet carrying the terminal event — which the
+/// handler would misread as "this deploy ends by a path that emits no
+/// event" (`reserve`'s rejection is the only real case of that). The single
+/// transaction removes the window: a reader always sees the row and the
+/// event agree.
 fn finished(
     ctx: &Ctx<'_>,
     deploy_id: i64,
@@ -228,7 +228,7 @@ fn finished(
 ) -> Result<()> {
     let stored = ctx
         .store
-        .append_event(&Event::finished(deploy_id, status, detail))?;
+        .finish_deploy_with_event(deploy_id, status, detail.as_deref())?;
     ctx.sink.emit(&stored);
     Ok(())
 }
@@ -255,8 +255,6 @@ async fn fail(
 
     match compensate(ctx, &spec.name, slug, previous, stage).await {
         Ok(()) => {
-            ctx.store
-                .finish_deploy(deploy_id, DeployStatus::RolledBack, Some(&cause))?;
             finished(
                 ctx,
                 deploy_id,
@@ -270,8 +268,6 @@ async fn fail(
         }
         Err(comp) => {
             let combined = format!("{cause}; compensation also failed: {comp:#}");
-            ctx.store
-                .finish_deploy(deploy_id, DeployStatus::Failed, Some(&combined))?;
             finished(ctx, deploy_id, DeployStatus::Failed, Some(combined.clone()))?;
             Ok(DeployOutcome::Failed {
                 failed_at: stage,

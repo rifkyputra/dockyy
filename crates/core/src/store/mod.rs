@@ -203,6 +203,63 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically finish a deploy and append its terminal event, in one
+    /// SQLite transaction.
+    ///
+    /// `finish_deploy` and `append_event` are two separate writes/locks. The
+    /// SSE handler reads the `deploys` row and the event backlog as two
+    /// separate queries; if a reader's row read lands after the status write
+    /// but its backlog read lands before the event append, it sees a terminal
+    /// row with no terminal event in the backlog. That is supposed to mean
+    /// "this deploy ended by a path that appends no event" (`reserve`
+    /// rejecting a duplicate is the only one) — a reader must never confuse
+    /// that with "the event just hasn't landed yet". Wrapping both writes in
+    /// one transaction removes the in-between state: a reader sees either
+    /// `in_progress` with no terminal event, or a terminal row with its event
+    /// — never the state where the row says done and the log hasn't caught up.
+    ///
+    /// `reserve`'s rejection path must keep calling plain `finish_deploy`, not
+    /// this: it deliberately writes no event, because the caller gets `Err`
+    /// and a 409 and is never handed the id to watch.
+    pub fn finish_deploy_with_event(
+        &self,
+        deploy_id: i64,
+        status: DeployStatus,
+        detail: Option<&str>,
+    ) -> Result<StoredEvent> {
+        let mut conn = self.conn.lock().expect("store lock");
+        let tx = conn
+            .transaction()
+            .context("starting finish-deploy-with-event transaction")?;
+
+        let n = tx
+            .execute(
+                "UPDATE deploys SET status = ?1, detail = ?2, finished_at = datetime('now')
+                 WHERE id = ?3",
+                params![status.as_str(), detail, deploy_id],
+            )
+            .context("finishing deploy")?;
+        if n == 0 {
+            bail!("no deploy with id {deploy_id}");
+        }
+
+        let event = Event::finished(deploy_id, status, detail.map(str::to_string));
+        let (stage, ev_status) = event.kind.columns();
+        let (id, at) = tx
+            .query_row(
+                "INSERT INTO events (deploy_id, stage, status, detail)
+                 VALUES (?1, ?2, ?3, ?4) RETURNING id, at",
+                params![event.deploy_id, stage, ev_status, event.detail],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .context("appending terminal event")?;
+
+        tx.commit()
+            .context("committing finish-deploy-with-event transaction")?;
+
+        Ok(StoredEvent { id, at, event })
+    }
+
     /// Read one deploy by id.
     pub fn deploy(&self, deploy_id: i64) -> Result<Option<DeployRow>> {
         let conn = self.conn.lock().expect("store lock");
@@ -1298,6 +1355,55 @@ mod tests {
         }
         let err = store.events_for(id).unwrap_err();
         assert!(err.to_string().contains("not terminal"), "was: {err}");
+    }
+
+    /// The property Finding 1 closes: a reader that sees the row terminal
+    /// also sees the terminal event, because both writes land in one
+    /// transaction. This only proves the "commit" half — that after a
+    /// successful call, the row and the event agree — since provoking the
+    /// append to fail mid-transaction (to prove the rollback half) is not
+    /// reachable from this test: nothing here can make the `INSERT INTO
+    /// events` half of `finish_deploy_with_event` fail independently of the
+    /// `UPDATE deploys` half using only the public `Store` API.
+    #[test]
+    fn finish_deploy_with_event_leaves_the_row_and_the_event_in_agreement() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+
+        let stored = store
+            .finish_deploy_with_event(id, DeployStatus::Done, Some("all stages ok"))
+            .expect("finish with event");
+
+        let row = store.deploy(id).expect("get").expect("row");
+        assert_eq!(row.status, DeployStatus::Done);
+        assert_eq!(row.detail.as_deref(), Some("all stages ok"));
+
+        let events = store.events_for(id).expect("read");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, stored.id);
+        assert_eq!(
+            events[0].event.kind,
+            EventKind::Finished {
+                status: DeployStatus::Done
+            }
+        );
+        assert_eq!(events[0].event.detail.as_deref(), Some("all stages ok"));
+    }
+
+    /// A deploy id that does not exist must fail before either write commits
+    /// — no orphan event for a row that was never touched.
+    #[test]
+    fn finish_deploy_with_event_on_an_unknown_id_writes_nothing() {
+        let (_dir, store) = open_temp();
+        let err = store
+            .finish_deploy_with_event(999, DeployStatus::Done, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+        assert_eq!(
+            store.events_for(999).expect("read").len(),
+            0,
+            "no event should have been left behind by the failed call"
+        );
     }
 
     #[test]

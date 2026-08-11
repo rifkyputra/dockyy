@@ -30,6 +30,19 @@ One path still finishes a deploy without an event: `reserve` rejecting a duplica
 and returns `Err`, so the caller gets a 409 and is never handed the id. The stream covers that row
 by checking its status before deciding to wait.
 
+A few other paths leave a deploy with no terminal event and, worse, no terminal *status* either —
+the row stays `in_progress` — so an already-connected stream sits on `rx.recv()` forever and
+`KeepAlive` holds the connection open indefinitely: `run_reserved` returning `Err` before
+`run_stages` ever runs (e.g. a bad stored spec fails `spec.validate()`), the `deploy_slot.acquire()`
+error return in `crates/daemon/src/api.rs` (only when the semaphore itself has closed, i.e. the
+daemon is shutting down), and the terminal write itself failing (`finish_deploy_with_event`
+returning `Err`, e.g. disk full). This is bounded in practice rather than fixed: the client that
+opened the stream eventually goes away (tab closed, browser gives up), and the deploy row itself is
+not stuck forever — a restart's `reconcile` sees anything still `in_progress` and settles it, which
+is exactly what reconcile exists for. There is no server-side timeout that closes a stream on its
+own; building one is a design decision (how long is long enough for a real slow deploy?) left for a
+future group, not a mechanical fix folded into this one.
+
 ## From G5 — a per-row store error aborts the whole reconcile batch
 
 `deploy::reconcile` `?`-propagates store errors (`load_previous`/`finish_deploy`/`release_lock`) per

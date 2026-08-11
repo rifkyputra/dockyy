@@ -332,7 +332,16 @@ async fn deploy_events(
     // the borrow of `st`.
     let store = st.store.clone();
 
-    let resume = resume_from(&headers);
+    // Clamped to the highest id this deploy has actually stored. `resume` is
+    // untrusted client input seeded straight into `last_sent`; an id above
+    // anything the store has ever assigned this deploy is impossible for a
+    // real client to have seen (ids are only handed out on insert), so
+    // trusting it verbatim would filter out every backlog and live event,
+    // including the terminal one, and the stream would never yield anything
+    // or close. Clamping treats that case the same as no resume point at
+    // all past what is already known, rather than as a promise to skip
+    // events that have not happened yet.
+    let resume = resume_from(&headers).min(backlog.last().map_or(0, |ev| ev.id));
 
     let stream = async_stream::stream! {
         let mut last_sent = resume;
@@ -1014,6 +1023,52 @@ mod tests {
         let data = sse_data(res).await;
         assert_eq!(data.len(), 2, "the already-seen event must not repeat");
         assert_eq!(data[0]["stage"], "build");
+    }
+
+    /// A `Last-Event-ID` past anything the store has ever assigned this deploy
+    /// is impossible for a real client to have seen. Trusting it verbatim
+    /// would filter out every backlog and live event, including the terminal
+    /// one, and the stream would never yield anything or close — this is the
+    /// hang Finding 3 closes. Clamping it must still let the stream deliver
+    /// live events and close on the terminal one.
+    #[tokio::test]
+    async fn a_last_event_id_past_the_end_does_not_stall_the_stream() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+
+        let res = app
+            .oneshot(get_resuming(
+                &format!("/api/deploys/{id}/events"),
+                &i64::MAX.to_string(),
+            ))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let live = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        hub.emit(&live);
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        // This await only returns because the stream actually closes; a stall
+        // here is the bug, not a slow assertion.
+        let data = sse_data(res).await;
+        assert_eq!(
+            data.len(),
+            2,
+            "the bogus resume point must not swallow events"
+        );
+        assert_eq!(data[0]["stage"], "detect");
+        assert_eq!(data[1]["stage"], "deploy");
     }
 
     /// A header that is not a number is a hint, not a command. Failing the
