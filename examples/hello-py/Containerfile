@@ -1,0 +1,11 @@
+FROM docker.io/library/python:3.12-alpine
+
+WORKDIR /app
+COPY app.py .
+
+# Unbuffered, or stderr writes sit in a pipe buffer and `journalctl -u` shows
+# nothing until the process exits — which looks exactly like a hung container.
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 7654
+CMD ["python", "app.py"]

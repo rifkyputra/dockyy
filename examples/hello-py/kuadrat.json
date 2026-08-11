@@ -1,0 +1,15 @@
+{
+  "name": "hello",
+  "image": "",
+  "command": null,
+  "env": [
+    ["GREETING", "hello from kuadrat"]
+  ],
+  "ports": ["7654:7654"],
+  "volumes": [],
+  "secrets": [],
+  "memory_max": "128M",
+  "health_cmd": null,
+  "restart_policy": "Always",
+  "route": null
+}
