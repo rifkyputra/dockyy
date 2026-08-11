@@ -45,6 +45,13 @@ enum Command {
         /// Route this app: domain:port (e.g. example.com:3000)
         #[arg(long)]
         route: Option<String>,
+        /// Where a running daemon would be listening. Tried first; only a
+        /// daemon that doesn't answer here falls back to an in-process
+        /// deploy. Must match the address `kuadrat serve --listen` was given
+        /// — the two default the same way so this only needs setting when
+        /// `serve` was told to use a non-default one.
+        #[arg(long, default_value_t = args::default_listen())]
+        listen: std::net::SocketAddr,
     },
     /// Manage podman secrets (values read from stdin, never argv)
     Secret {
@@ -116,7 +123,12 @@ async fn main() -> Result<()> {
             let image = build(&exec, &plan, &slug(name)).await?;
             println!("{image}");
         }
-        Command::Deploy { app, path, route } => {
+        Command::Deploy {
+            app,
+            path,
+            route,
+            listen,
+        } => {
             use kuadrat_core::deploy::{run, Ctx, DeployOutcome};
             use kuadrat_core::store::Store;
 
@@ -127,7 +139,6 @@ async fn main() -> Result<()> {
             // `/deploy/:id` page. Only an unreachable daemon falls back to
             // running in-process — a refusal is the daemon's answer and is
             // reported, never retried locally. See `daemon_client` for why.
-            let listen = args::default_listen();
             match daemon_client::try_deploy(&exec, listen, &app).await {
                 daemon_client::Handoff::Accepted { deploy_id } => {
                     println!("queued as deploy {deploy_id} on the running daemon");
@@ -135,7 +146,14 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
                 daemon_client::Handoff::Refused { status, message } => {
-                    eprintln!("daemon refused the deploy ({status}): {message}");
+                    match status {
+                        Some(status) => {
+                            eprintln!("daemon refused the deploy ({status}): {message}")
+                        }
+                        None => {
+                            eprintln!("daemon refused the deploy (status unknown): {message}")
+                        }
+                    }
                     std::process::exit(1);
                 }
                 daemon_client::Handoff::Unreachable => {

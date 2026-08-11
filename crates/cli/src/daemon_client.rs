@@ -24,9 +24,15 @@ pub enum Handoff {
     /// Curl could not connect at all — nothing is listening on `listen`. The
     /// only case the caller should fall back to running the deploy in-process.
     Unreachable,
-    /// The daemon answered and said no. Its status and message, reported
-    /// verbatim — this is never a reason to retry the deploy locally.
-    Refused { status: u16, message: String },
+    /// The daemon answered and said no. `status` is the real HTTP status when
+    /// curl reported one and `None` when it could not be read — never a
+    /// guess standing in for a real number, since a guess presented as fact
+    /// can send the operator chasing the wrong cause. Either way this is
+    /// never a reason to retry the deploy locally.
+    Refused {
+        status: Option<u16>,
+        message: String,
+    },
 }
 
 /// curl's exit status for "failed to connect to host" (`man curl` EXIT
@@ -76,22 +82,21 @@ pub async fn try_deploy(exec: &dyn Executor, listen: SocketAddr, app: &str) -> H
             // (never falling back to a local run) is the only safe read of a
             // success response this module cannot make sense of.
             None => Handoff::Refused {
-                status: status.unwrap_or(200),
+                status,
                 message: format!("daemon returned an unreadable response: {body}"),
             },
         }
     } else {
         let message = parse_error_message(body).unwrap_or_else(|| body.trim().to_string());
-        Handoff::Refused {
-            // A status curl could not report is still an answer, not a
-            // missing daemon — this only guesses at the number, never at the
-            // outcome. 409 is the most conservative guess when the real code
-            // is unavailable, since "something is already happening" is
-            // exactly the case this module must never paper over; the real
-            // code from `-w` is used whenever curl supplies one.
-            status: status.unwrap_or(409),
-            message,
-        }
+        // `status` is already `None` when curl's `-w` output could not be
+        // read off the wire (split_status found no trailing status line).
+        // That is reported as unknown, not guessed at: an invented number
+        // presented to the operator as the daemon's real status would send
+        // them chasing whatever that number conventionally means instead of
+        // the actual failure. The safety property does not need the number —
+        // any non-2xx exit that is not "could not connect" is a refusal
+        // regardless of which status it carries.
+        Handoff::Refused { status, message }
     }
 }
 
@@ -176,9 +181,37 @@ mod tests {
 
     /// The rule this whole module exists for. A 409 says a deploy of this app
     /// is already running; falling back would start a second one and defeat
-    /// the lock that makes that impossible everywhere else.
+    /// the lock that makes that impossible everywhere else. The stdout here
+    /// is what curl actually emits: `--fail-with-body` keeps the body, and
+    /// `-w '\n%{http_code}'` still appends the real code on its own trailing
+    /// line even though the exit code itself is the generic `22` — this is
+    /// the fixture that exercises the real parse, not just the default.
     #[tokio::test]
     async fn a_409_is_the_daemons_answer_and_is_not_retried_locally() {
+        let exec = FakeExecutor::new();
+        exec.expect(
+            "curl",
+            out(
+                22,
+                "{\"error\":\"another deploy of web is already in progress\"}\n409",
+                "",
+            ),
+        );
+        match try_deploy(&exec, addr(), "web").await {
+            Handoff::Refused { status, message } => {
+                assert_eq!(status, Some(409));
+                assert!(message.contains("already in progress"), "{message}");
+            }
+            other => panic!("must not fall back: {other:?}"),
+        }
+    }
+
+    /// When curl's `-w` output is missing entirely — no trailing status
+    /// line, as would happen if that flag were ever dropped or mis-parsed —
+    /// the status is reported as unknown, not invented. A refusal is still a
+    /// refusal either way; only the number curl couldn't provide is absent.
+    #[tokio::test]
+    async fn a_refusal_with_no_status_line_reports_the_status_as_unknown() {
         let exec = FakeExecutor::new();
         exec.expect(
             "curl",
@@ -190,7 +223,7 @@ mod tests {
         );
         match try_deploy(&exec, addr(), "web").await {
             Handoff::Refused { status, message } => {
-                assert_eq!(status, 409);
+                assert_eq!(status, None);
                 assert!(message.contains("already in progress"), "{message}");
             }
             other => panic!("must not fall back: {other:?}"),
