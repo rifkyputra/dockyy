@@ -60,29 +60,28 @@ is rare, and reconciliation recovers a stuck lock, so this was deferred. A clean
 surface the real outcome while still signalling the release failure — worth a look once core has any
 logging/telemetry, or fold into G5 where reconciliation already owns stuck locks.
 
-## From H2 — CLI-deployed apps have no registration
+## From H2 — CLI-deployed apps have no registration (CLOSED by H7, 2026-08-11)
 
-H2 added `app_config` (registered apps) alongside `apps` (deployed apps), but nothing back-fills
+H2 added `app_config` (registered apps) alongside `apps` (deployed apps), but nothing back-filled
 `app_config` for an app that was already deployed from the CLI before registration existed, or that
-is deployed straight from argv without ever calling `register_app`. On the acceptance host, every
-app deployed there came from the CLI, so each has an `apps` row and no `app_config` row.
+was deployed straight from argv without ever calling `register_app`.
 
-Nothing is broken and no data is lost — `current_spec`, `apply`, and the rest of the deploy path
-read `apps`, not `app_config`, and none of that changes. This is a display consequence, not a data
-one: a UI app list built by calling `list_app_configs` would come back empty on a host that is
-actively running several apps, and "zero apps" is exactly what data loss would also look like to the
-operator looking at the screen, even though it isn't.
+When this was written, it was rated "nothing is broken" because `current_spec`, `apply`, and the
+rest of the deploy path read `apps`, not `app_config`. That was true at the time and stopped being
+true the moment H7 landed: the daemon's `POST /api/apps/:name/deploy` — which `kuadrat deploy`
+tries first, before ever falling back to running locally — starts by reading `app_config` and 404s
+when the row is missing. A gap graded "display consequence, not a data one" against the code that
+existed at H2 became load-bearing for correctness against code a later group wrote, without
+changing a line of the code the H2 review actually looked at. **The lesson for next time: a gap's
+severity is a claim about the whole system as it exists *when read*, not just at the moment it was
+written down — re-check it whenever a later group starts depending on the path it describes, not
+only when that path itself changes.**
 
-Two options for the next group:
-
-1. List the union of `apps` and `app_config`, keyed by name.
-2. Have `kuadrat deploy` back-fill `register_app` with its argv repo path on every run, so the two
-   tables converge on their own.
-
-Option 2 is preferred. It is smaller — the UI needs no union/merge logic, `list_app_configs` stays
-the one source the app list reads from. It repairs the host incrementally, after one deploy per app,
-with no migration step. And it makes the CLI and the UI agree on what "an app" is going forward,
-rather than leaving `apps` and `app_config` as two answers to the same question indefinitely.
+Closed by option 2 of the two listed here originally: `kuadrat deploy` now calls
+`Store::register_app` with its own (canonicalised) repo path and `--route`, before attempting the
+daemon handoff, on every run — so the first deploy of an app the daemon has never heard of no
+longer 404s, and every later deploy keeps the registration converged on whatever was last asked
+for. See `crates/cli/src/main.rs`, the `Command::Deploy` arm.
 
 ## Acceptance — PASSED 2026-08-10
 

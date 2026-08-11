@@ -134,12 +134,27 @@ async fn main() -> Result<()> {
 
             let route_override = route.map(|s| args::parse_route(&s)).transpose()?;
 
+            let store = Store::open(&paths.db_path)?;
+
+            // Back-fill the registration the daemon handoff below depends on
+            // — see `resolve::backfill_registration` for why, and
+            // docs/known-gaps.md's now-closed "CLI-deployed apps have no
+            // registration" entry.
+            resolve::backfill_registration(&store, &app, &path, route_override.clone())?;
+
             // Prefer a running daemon: it queues behind the global
             // one-at-a-time semaphore and gives this deploy an addressable
             // `/deploy/:id` page. Only an unreachable daemon falls back to
             // running in-process — a refusal is the daemon's answer and is
-            // reported, never retried locally. See `daemon_client` for why.
-            match daemon_client::try_deploy(&exec, listen, &app).await {
+            // reported, never retried locally. When `--root` is set the
+            // handoff is skipped outright: see
+            // `daemon_client::try_deploy_unless_rooted` for why.
+            if cli.root.is_some() {
+                println!("--root is set; deploying locally instead of handing off to a daemon");
+            }
+            match daemon_client::try_deploy_unless_rooted(&exec, listen, &app, cli.root.as_deref())
+                .await
+            {
                 daemon_client::Handoff::Accepted { deploy_id } => {
                     println!("queued as deploy {deploy_id} on the running daemon");
                     println!("http://{listen}/deploy/{deploy_id}");
@@ -157,11 +172,12 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
                 daemon_client::Handoff::Unreachable => {
-                    println!("no daemon running; deploying locally");
+                    if cli.root.is_none() {
+                        println!("no daemon running; deploying locally");
+                    }
                 }
             }
 
-            let store = Store::open(&paths.db_path)?;
             let spec = resolve::resolve_spec(&app, &path, &store, route_override)?;
             let ctx = Ctx {
                 exec: &exec,
