@@ -22,12 +22,7 @@ use crate::stream::events_sse;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(crate::pages::index))
-        // Stub: only ever 404s in this task. Its real body — the app detail
-        // page — is Task 6; it exists here so the HTML 404 has a route to hit.
-        .route(
-            "/app/:name",
-            get(|| async { crate::pages::not_found("app") }),
-        )
+        .route("/app/:name", get(crate::pages::app_detail))
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
@@ -373,6 +368,47 @@ pub(crate) mod tests {
     fn harness() -> (Router, Arc<Store>, TempDir) {
         let (app, store, _hub, dir) = harness_parts();
         (app, store, dir)
+    }
+
+    /// A harness whose `journalctl` returns one line of output, for testing
+    /// the app detail page's log section.
+    pub(crate) fn harness_with_log_line(
+        line: &str,
+    ) -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        harness_with_journalctl(CommandOutput {
+            status: 0,
+            stdout: format!("{line}\n"),
+            stderr: String::new(),
+        })
+    }
+
+    /// A harness whose `journalctl` fails, for testing that the app detail
+    /// page survives an unreadable journal.
+    pub(crate) fn harness_with_failing_logs() -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        harness_with_journalctl(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "journalctl: permission denied".into(),
+        })
+    }
+
+    fn harness_with_journalctl(
+        journalctl: CommandOutput,
+    ) -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open(&dir.path().join("k.db")).expect("store"));
+        let exec = FakeExecutor::new();
+        exec.expect("systemctl", ok());
+        exec.expect("journalctl", journalctl);
+        let mut state = AppState::new(
+            Arc::new(exec),
+            Arc::new(FakeFileSystem::new()),
+            store.clone(),
+            Paths::rooted(dir.path()),
+        );
+        state.hub = Arc::new(BroadcastSink::with_capacity(256));
+        let hub = state.hub.clone();
+        (router(state), store, hub, dir)
     }
 
     pub(crate) fn get(path: &str) -> Request<Body> {
@@ -1084,5 +1120,93 @@ pub(crate) mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .starts_with("text/html"));
+    }
+
+    #[tokio::test]
+    async fn the_detail_page_shows_the_route_and_the_recent_deploys() {
+        let (app, store, _hub, _d) = harness_parts();
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: Some(Route {
+                    domain: "example.com".into(),
+                    port: 3000,
+                }),
+            })
+            .expect("register");
+        let id = store.create_deploy("web").expect("deploy");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let body = body_text(app.oneshot(get("/app/web")).await.expect("send")).await;
+        assert!(body.contains("example.com"), "route missing: {body}");
+        assert!(
+            body.contains(&format!("/deploy/{id}")),
+            "no link to the deploy"
+        );
+    }
+
+    /// A log line is the least trusted string on the page. It must arrive as
+    /// text.
+    #[tokio::test]
+    async fn a_log_line_containing_markup_is_escaped() {
+        let (app, store, _hub, _d) = harness_with_log_line("<script>alert(1)</script>");
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: None,
+            })
+            .expect("register");
+
+        let body = body_text(app.oneshot(get("/app/web")).await.expect("send")).await;
+        assert!(
+            !body.contains("<script>alert(1)</script>"),
+            "raw log markup rendered"
+        );
+        assert!(body.contains("&lt;script&gt;"), "expected the escaped form");
+    }
+
+    /// One unreadable journal must not blank the page an operator opened to
+    /// find out what is wrong.
+    #[tokio::test]
+    async fn a_failed_log_read_leaves_the_rest_of_the_page_intact() {
+        let (app, store, _hub, _d) = harness_with_failing_logs();
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: None,
+            })
+            .expect("register");
+
+        let res = app.oneshot(get("/app/web")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        assert!(
+            body.contains("/srv/web"),
+            "the rest of the page is gone: {body}"
+        );
+        assert!(
+            body.to_lowercase().contains("could not read"),
+            "the log section must say why it is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_app_with_no_deploys_renders_without_a_history_table() {
+        let (app, store, _hub, _d) = harness_parts();
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: None,
+            })
+            .expect("register");
+
+        let res = app.oneshot(get("/app/web")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

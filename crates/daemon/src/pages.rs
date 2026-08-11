@@ -6,13 +6,23 @@
 //! the application wrote to its stdout and stderr". `maud::PreEscaped` does
 //! not appear in this module, and should not.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use kuadrat_core::logs::tail;
+use kuadrat_core::workloads::query::status;
 use maud::{html, Markup, DOCTYPE};
 
 use crate::api::summarise;
 use crate::state::AppState;
+
+/// Deploys shown on an app's page. Fixed by the design document rather than
+/// left to taste, so the page and anyone reading the spec agree.
+const RECENT_DEPLOYS: usize = 10;
+
+/// Log lines tailed on an app's page — the same default the JSON logs endpoint
+/// uses, so the page and the API mean the same thing by "the recent log".
+const LOG_LINES: usize = 100;
 
 /// The shell every page shares.
 fn layout(title: &str, body: Markup) -> Markup {
@@ -80,6 +90,117 @@ pub async fn index(State(st): State<AppState>) -> Markup {
     };
 
     layout("apps", body)
+}
+
+/// An app's detail page at `GET /app/:name`: status, route, image, its
+/// `RECENT_DEPLOYS` most recent deploys, and a `LOG_LINES`-line log tail.
+///
+/// A registration that fails to read is treated the same as one that does
+/// not exist — both send the operator to the 404 rather than a 500, matching
+/// `index`'s bias toward failing thin rather than failing closed.
+pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    let config = match st.store.app_config(&name) {
+        Ok(Some(c)) => c,
+        Ok(None) | Err(_) => return not_found("app"),
+    };
+
+    let status_label = match status(&*st.exec, &*st.fsys, &st.paths, &name).await {
+        Ok(s) => s.label(),
+        Err(_) => "Unknown",
+    };
+
+    // `current_spec` is `None` for an app that has never deployed — that is
+    // not an error, just nothing to show yet.
+    let image = st
+        .store
+        .current_spec(&name)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|v| v.get("image")?.as_str().map(str::to_string));
+
+    let deploys = st
+        .store
+        .recent_deploys(&name, RECENT_DEPLOYS)
+        .unwrap_or_default();
+
+    // The interesting part: one unreadable journal renders a note, not a
+    // blank page. This is the one failure mode this handler must not let
+    // escape as a 500 or an empty body.
+    let log_section = match tail(&*st.exec, &name, LOG_LINES).await {
+        Ok(lines) if lines.is_empty() => html! {
+            p id="log-empty" { "No output yet." }
+        },
+        Ok(lines) => html! {
+            pre id="log-tail" { (lines.join("\n")) }
+        },
+        Err(e) => html! {
+            p id="log-error" { "Could not read the journal: " (format!("{e:#}")) }
+        },
+    };
+
+    let body = html! {
+        h1 { (config.name) }
+        dl id="app-facts" {
+            dt { "Status" }
+            dd { (status_label) }
+            dt { "Repo" }
+            dd { (config.repo_path) }
+            dt { "Route" }
+            dd {
+                @if let Some(route) = &config.route {
+                    (route.domain) ":" (route.port)
+                } @else {
+                    "—"
+                }
+            }
+            dt { "Image" }
+            dd {
+                @if let Some(image) = &image {
+                    (image)
+                } @else {
+                    "—"
+                }
+            }
+        }
+
+        h2 { "Recent deploys" }
+        @if deploys.is_empty() {
+            p { "No deploys yet." }
+        } @else {
+            table id="deploy-history" {
+                thead {
+                    tr {
+                        th { "Deploy" }
+                        th { "Stage" }
+                        th { "Status" }
+                        th { "Detail" }
+                    }
+                }
+                tbody {
+                    @for d in &deploys {
+                        tr {
+                            td { a href={ "/deploy/" (d.id) } { (d.id) } }
+                            td { (d.stage.as_str()) }
+                            td { (d.status.as_str()) }
+                            td {
+                                @if let Some(detail) = &d.detail {
+                                    (detail)
+                                } @else {
+                                    "—"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        h2 { "Log" }
+        (log_section)
+    };
+
+    layout(&config.name, body).into_response()
 }
 
 /// A plain HTML 404, for page routes — kept apart from the JSON API's error
