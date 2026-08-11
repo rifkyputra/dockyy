@@ -1,6 +1,5 @@
 [Unit]
 Description=kuadrat deploy daemon
-Documentation=https://github.com/…/kuadrat
 After=network.target podman.socket
 
 [Service]
