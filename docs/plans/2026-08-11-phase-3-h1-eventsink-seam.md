@@ -23,7 +23,9 @@ group), `std::sync::Mutex`.
   piercing one is not. No HTTP or transport dependency enters `crates/core` in this group.
 - **`make check` must pass**: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
   A formatting slip fails the build — run `cargo fmt` before every commit.
-- **`cargo test --all` must pass.** Baseline is **123 tests** at `8172b22`; the count only goes up.
+- **`cargo test --all` must pass.** Baseline at `10c0dbc` is **127 total** — `kuadrat-core` 123
+  plus `kuadrat` (cli) 4, printed as two separate `test result:` lines. Counts below give both,
+  because the core figure alone looks like a total and will not match what the command prints.
 - **No new dependencies.** Everything here uses what the workspace already declares.
 - **Secret values never appear** in events, logs, error messages, or committed files. An event's
   `detail` carries an error string — never a secret value.
@@ -275,7 +277,7 @@ Expected: PASS — the four new tests plus the two that were already there.
 - [ ] **Step 7: Run the full gate**
 
 Run: `cargo fmt && cargo test --all && cargo clippy --all-targets -- -D warnings`
-Expected: all pass; total test count **127**.
+Expected: all pass. Core **127**, cli 4 — **131 total**.
 
 If clippy flags `new_without_default` on `FakeSink::new`, it is wrong here — `Default` **is**
 derived. If it flags anything else, fix the code rather than allowing the lint.
@@ -522,7 +524,7 @@ Expected: PASS, including the three new tests.
 - [ ] **Step 8: Run the full gate**
 
 Run: `cargo fmt && cargo test --all && cargo clippy --all-targets -- -D warnings`
-Expected: all pass; total **130**.
+Expected: all pass. Core **130**, cli 4 — **134 total**.
 
 - [ ] **Step 9: Commit**
 
@@ -916,7 +918,7 @@ scripted command; fix the harness, not the assertion.
 - [ ] **Step 8: Run the full gate**
 
 Run: `cargo fmt && cargo test --all && cargo clippy --all-targets -- -D warnings`
-Expected: all pass; total **134**.
+Expected: all pass. Core **134**, cli 4 — **138 total**.
 
 - [ ] **Step 9: Commit**
 
@@ -1045,7 +1047,7 @@ trusted."
 
 ## H1 completion checklist
 
-- [ ] `cargo test --all` passes with **134** tests (123 baseline + 11)
+- [ ] `cargo test --all` passes with **138 total** — core 134 (123 + 11 new), cli 4 unchanged
 - [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean
 - [ ] `EventSink` has exactly two implementations in `core`: `NullSink`, `FakeSink`
 - [ ] `Ctx` has five fields; all 11 construction sites compile
