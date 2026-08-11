@@ -7,6 +7,7 @@
 //! driver later becomes another consumer of `core` without touching this.
 
 pub mod api;
+pub mod assets;
 pub mod config;
 pub mod error;
 pub mod hub;

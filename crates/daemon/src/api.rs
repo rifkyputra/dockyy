@@ -27,6 +27,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/:name/logs", get(logs))
         .route("/api/deploys/:id", get(get_deploy))
         .route("/api/deploys/:id/events", get(deploy_events))
+        .route("/assets/htmx.min.js", get(crate::assets::htmx))
+        .route("/assets/sse.min.js", get(crate::assets::sse))
+        .route("/assets/kuadrat.css", get(crate::assets::css))
         .with_state(state)
 }
 
@@ -314,7 +317,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::hub::BroadcastSink;
     use axum::body::Body;
@@ -340,7 +343,7 @@ mod tests {
 
     /// A router over fakes and a temp-file store. No socket is bound and no
     /// podman is required, so these run anywhere the unit tests do.
-    fn harness_parts() -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+    pub(crate) fn harness_parts() -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
         harness_with_capacity(256)
     }
 
@@ -365,7 +368,7 @@ mod tests {
         (app, store, dir)
     }
 
-    fn get(path: &str) -> Request<Body> {
+    pub(crate) fn get(path: &str) -> Request<Body> {
         Request::builder()
             .uri(path)
             .body(Body::empty())
