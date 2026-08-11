@@ -16,7 +16,6 @@
 - **Secret values never appear** in specs, logs, error messages, or committed files. Specs carry secret *names* only.
 - **Paths are injectable.** No hardcoded `/etc/...` outside `Paths::default()`.
 - `make check && make test` must pass with **zero warnings** before any task is considered done.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 - Out of scope for phase 1 (do not build): SQLite persistence, deploy state machine, gateway/Caddy, secrets CRUD, logs, events, HTTP, MCP.
 
 ---

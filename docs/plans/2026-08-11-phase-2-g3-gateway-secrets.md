@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` — exactly "Claude Opus 5", matching every other commit in this project.
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.**
 - **Every host command goes through the `Executor` trait; every file access through `FileSystem`.** No `tokio::process::Command` outside `exec::local`; no `std::fs`/`tokio::fs`/`Path::exists()` outside `fs::local` (the store carve-out excepted). `podman` and `systemctl` are invoked via `exec.run(...)`/`exec.run_with_stdin(...)`.
 - **Secret VALUES never appear in argv, in a spec, in a log, in an error message, or in `FakeExecutor::calls()`.** They travel only through stdin. Error messages name the secret and echo podman's stderr, never the value.

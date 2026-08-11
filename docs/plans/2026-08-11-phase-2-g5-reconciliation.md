@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` — exactly "Claude Opus 5".
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.** Every host command via the `Executor`/`FileSystem` seams (store carve-out excepted).
 - **The lock is released for EVERY reconciled deploy** — both when its rollback succeeds (`RolledBack`) and when the rollback itself fails (`Failed`). A reconciled deploy is terminally finished; leaving its lock held would re-brick the app.
 - Available (G1–G4b): `store::in_progress_deploys() -> Vec<DeployRow>` (`DeployRow { id, app, stage, status, detail }`); the private-in-`run.rs` helpers `compensate(ctx, name, slug, previous, failed_at)` and `load_previous(ctx, name)`; `store::{finish_deploy, release_lock}`; `deploy::{Ctx, DeployOutcome, DeployStatus, Stage}`; `spec::slug`.

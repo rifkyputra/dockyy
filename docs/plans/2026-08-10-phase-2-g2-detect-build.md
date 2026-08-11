@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.**
 - **Every host command goes through the `Executor` trait; every file probe through `FileSystem`.** No `tokio::process::Command` outside `exec::local`; no `std::fs`/`tokio::fs`/`Path::exists()` in `deploy` code. `git` and `podman` are invoked via `exec.run(...)`.
 - **Do not build, in G2** (later groups): the gateway, secrets, `run_with_stdin`, the state-machine driver, compensation, reconciliation, or the SQLite deploy flow. G2 is detect + build + a build CLI only. Do not wire detect/build into the store — that is G4.

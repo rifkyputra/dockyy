@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` — exactly "Claude Opus 5".
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.**
 - **Every host command goes through the `Executor`/`FileSystem` seams** (store carve-out excepted). The CLI reading the operator's `kuadrat.json` off local disk with `std::fs` is allowed (it is not a host interaction — ADR-0002).
 - **The lock is released on EVERY exit path** — success, rollback, hard failure, and the early return when the spec is invalid or the lock is already held.

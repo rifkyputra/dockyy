@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>` — exactly "Claude Opus 5".
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.**
 - **Every host command goes through the `Executor` trait; every file access through `FileSystem`.** No `tokio::process::Command` outside `exec::local`; no `std::fs`/`tokio::fs`/`Path::exists()` in non-test code outside `fs::local` (store carve-out excepted).
 - **Do not build, in G4a** (that is G4b): the `deploy::run` driver, the compensation matrix, the per-app-lock lifecycle wiring, `kuadrat deploy`, or `resolve_spec`. G4a defines the value types and stage helpers; it does not sequence them.

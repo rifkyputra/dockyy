@@ -12,7 +12,6 @@
 
 - **`make check && make test` must pass with ZERO warnings.** `make check` = `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`. Run `cargo fmt` before every commit.
 - **The Rust toolchain is NOT on the default PATH.** Every shell must first `export PATH="$HOME/.cargo/bin:$PATH"`. Verify with `cargo --version`; if missing, report BLOCKED.
-- Commit messages follow Conventional Commits and end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
 - **`kuadrat-core` never opens a socket and never takes a `host` parameter.** The store is not an exception — no `host` argument appears anywhere.
 - **The store carve-out is explicit and sanctioned.** `store` may call `rusqlite::Connection::open` and `std::fs::create_dir_all` directly. This is NOT a `FileSystem`-seam violation: the DB is kuadrat's own state, not a side effect on a managed host. It is the only place in the crate allowed to touch the filesystem outside `fs::local`. ADR-0002 is amended in Task 3 to record this.
 - **Do not build, in G1** (later task groups): Detect, Build, Secrets, Apply, Route, Healthcheck, the state-machine driver, compensation, reconciliation logic, the gateway, `run_with_stdin`, or any `podman`/`systemctl` call. G1 is persistence and its value types only.
