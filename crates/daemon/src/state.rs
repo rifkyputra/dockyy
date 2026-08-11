@@ -66,13 +66,17 @@ impl AppState {
 /// route in the UI silently ineffective: the operator removes the domain, the
 /// next deploy re-applies the old route from the stored spec, and the Caddy
 /// fragment goes straight back up.
-pub fn spec_for(config: &AppConfig, fsys_read: impl FnOnce(&Path) -> Option<String>) -> Result<WorkloadSpec> {
+pub fn spec_for(
+    config: &AppConfig,
+    fsys_read: impl FnOnce(&Path) -> Option<String>,
+) -> Result<WorkloadSpec> {
     let repo = Path::new(&config.repo_path);
     let file = repo.join("kuadrat.json");
 
     let mut spec: WorkloadSpec = match fsys_read(&file) {
-        Some(text) => serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", file.display()))?,
+        Some(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))?
+        }
         None => bail!(
             "no spec for {}: add a kuadrat.json to {} or deploy it once with one",
             config.name,
@@ -131,8 +135,8 @@ mod tests {
             domain: "old.example.com".into(),
             port: 9999,
         };
-        let spec = spec_for(&config(Some(route())), |_| Some(spec_json(Some(stale))))
-            .expect("resolve");
+        let spec =
+            spec_for(&config(Some(route())), |_| Some(spec_json(Some(stale)))).expect("resolve");
         assert_eq!(spec.route, Some(route()));
     }
 
