@@ -245,3 +245,35 @@ host, which is why it is not run automatically. Run it with:
 PATH=$HOME/.cargo/bin:$PATH cargo build --release
 sudo bash scripts/serve-acceptance.sh
 ```
+
+## From H7 acceptance — a local deploy hung in Healthcheck, unexplained
+
+`scripts/serve-acceptance.sh` check 8 fails: the in-process fallback deploy hangs in the Healthcheck
+stage until the script's own `timeout 180` kills it. Three runs, same result. The other thirteen
+checks pass.
+
+What is established:
+
+- The deploy's last event is `healthcheck started`; there is no terminal event, the row stays
+  `in_progress`, and its lock stays held (freed by `kuadrat reconcile`).
+- **The container is healthy the whole time.** `podman ps` during the hang shows
+  `Up 3 minutes (healthy)` with the port published, and `systemctl status` shows the unit active
+  since two seconds before the healthcheck began.
+- The binary running it has the wall-clock bound (`did not become healthy within` present,
+  `after N checks` absent) and rendered the `HealthTimeout=5s` in the unit, so it is not a stale
+  build.
+- `poll_health` is bounded on paper: a 60s budget, each attempt wrapped in a 5s
+  `tokio::time::timeout`, `kill_on_drop(true)` on the child.
+- `podman healthcheck run` against a healthy container returns in ~0.15s, reproduced rootless.
+
+So every static reading says the stage should give up at 60s with an error and roll back. It does
+not, and where the 180 seconds go is unknown.
+
+The observation that would settle it has to be taken **while it is hung**: `/proc/<pid>/wchan` for
+the CLI, and `ps -eLf` to see whether a `podman` child outlived its cancelled future. The
+possibilities not yet excluded are a starved tokio runtime, a child that cancellation does not
+detach from, and something not yet considered.
+
+Not blocking phase 4: the feature works — the same deploy succeeds through the daemon in about a
+second, and the fallback's own message prints correctly. What is untrustworthy is the *bound*, which
+means a pathological deploy can still stall a CLI invocation indefinitely.
