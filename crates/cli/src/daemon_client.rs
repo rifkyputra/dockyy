@@ -13,6 +13,7 @@
 //! everywhere else in this system.
 
 use std::net::SocketAddr;
+use std::path::Path;
 
 use kuadrat_core::exec::Executor;
 
@@ -46,6 +47,13 @@ const CURL_COULD_NOT_CONNECT: i32 = 7;
 /// browser. `--fail-with-body` keeps the body on a 4xx/5xx (plain `--fail`
 /// discards it), and `-w '\n%{http_code}'` appends the real status after it —
 /// still emitted even when `--fail-with-body` turns the exit code into `22`.
+/// `--noproxy '*'` matters more than it looks: curl does not exempt loopback
+/// from `http_proxy`/`ALL_PROXY` on its own, so without it a proxy sitting
+/// between this process and `listen` can answer in the daemon's place — a
+/// dead proxy reads as [`CURL_COULD_NOT_CONNECT`] (a false local fallback)
+/// and a live one that 502s reads as [`Handoff::Refused`] (an "answer" that
+/// was never the daemon's). Bypassing the proxy is what keeps this module's
+/// unreachable/refused distinction meaning what it says.
 pub async fn try_deploy(exec: &dyn Executor, listen: SocketAddr, app: &str) -> Handoff {
     let url = format!("http://{listen}/api/apps/{}/deploy", path_segment(app));
     let args = vec![
@@ -55,6 +63,8 @@ pub async fn try_deploy(exec: &dyn Executor, listen: SocketAddr, app: &str) -> H
         "-H".to_string(),
         "Accept: application/json".to_string(),
         "--fail-with-body".to_string(),
+        "--noproxy".to_string(),
+        "*".to_string(),
         "-w".to_string(),
         "\n%{http_code}".to_string(),
         url,
@@ -98,6 +108,33 @@ pub async fn try_deploy(exec: &dyn Executor, listen: SocketAddr, app: &str) -> H
         // regardless of which status it carries.
         Handoff::Refused { status, message }
     }
+}
+
+/// [`try_deploy`], but suppressed entirely when `root` is set.
+///
+/// `--root` means "do not touch the real host". A daemon that answers on
+/// `listen` is, by definition, the real host — this process has no way to
+/// learn *that* daemon's own `--root`, so the only way to keep `--root`'s
+/// promise is to never ask it for a handoff at all and run locally instead.
+/// Returning `Handoff::Unreachable` without calling `exec` (rather than
+/// calling `try_deploy` and discarding an `Accepted`) is also what keeps
+/// this provable: with `root` set, no `curl` call is recorded, so a test can
+/// assert on `exec.calls()` rather than trust a code path it cannot see run.
+///
+/// This is also what protects the property the module doc leans on: the
+/// local fallback's safety from a concurrent deploy holds only because the
+/// daemon and a local run share one SQLite file and its per-app lock, which
+/// is true only while the two agree on `root`.
+pub async fn try_deploy_unless_rooted(
+    exec: &dyn Executor,
+    listen: SocketAddr,
+    app: &str,
+    root: Option<&Path>,
+) -> Handoff {
+    if root.is_some() {
+        return Handoff::Unreachable;
+    }
+    try_deploy(exec, listen, app).await
 }
 
 /// Split curl's `-w '\n%{http_code}'` output into the response body and the
@@ -163,6 +200,45 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
         }
+    }
+
+    /// `--root` suppresses the handoff outright, before curl is ever
+    /// invoked — not merely discarded after the fact. A running daemon on
+    /// the default root cannot be told this process is `--root`-scoped, so
+    /// even one that would otherwise happily accept the deploy must never
+    /// be asked: this is the property that keeps `--root`'s "do not touch
+    /// the real host" promise, and this is what asserting on `exec.calls()`
+    /// proves rather than just `Handoff::Unreachable`'s shape.
+    #[tokio::test]
+    async fn a_root_flag_skips_the_handoff_without_ever_calling_curl() {
+        let exec = FakeExecutor::new();
+        // Scripted to accept, so a passing test can only mean the call was
+        // skipped, not that it happened to fail some other way.
+        exec.expect("curl", out(0, r#"{"deploy_id":1}"#, ""));
+
+        let handoff =
+            try_deploy_unless_rooted(&exec, addr(), "web", Some(Path::new("/tmp/root"))).await;
+
+        assert!(matches!(handoff, Handoff::Unreachable));
+        assert!(
+            exec.calls().is_empty(),
+            "curl must not run at all when --root is set: {:?}",
+            exec.calls()
+        );
+    }
+
+    /// With no `--root`, `try_deploy_unless_rooted` behaves exactly like
+    /// `try_deploy` — the suppression is additive, not a second code path
+    /// that could drift from the one every other test in this module covers.
+    #[tokio::test]
+    async fn with_no_root_the_handoff_runs_normally() {
+        let exec = FakeExecutor::new();
+        exec.expect("curl", out(0, r#"{"deploy_id":7}"#, ""));
+
+        assert!(matches!(
+            try_deploy_unless_rooted(&exec, addr(), "web", None).await,
+            Handoff::Accepted { deploy_id: 7 }
+        ));
     }
 
     #[tokio::test]
@@ -251,6 +327,25 @@ mod tests {
             try_deploy(&exec, addr(), "web").await,
             Handoff::Refused { .. }
         ));
+    }
+
+    /// curl does not exempt loopback from `http_proxy`/`ALL_PROXY` on its
+    /// own. Without `--noproxy '*'` a proxy sitting in front of `listen`
+    /// could answer in the daemon's place — turning a dead proxy into a
+    /// false `Unreachable` and a live one's 502 into a `Refused` that never
+    /// came from the daemon. Beside `curl_is_asked_to_treat_an_http_error_as_a_failure`
+    /// in `webhook.rs`, the same style of assertion for this module's own
+    /// invariant.
+    #[tokio::test]
+    async fn the_deploy_request_bypasses_any_configured_proxy() {
+        let exec = FakeExecutor::new();
+        exec.expect("curl", out(0, r#"{"deploy_id":1}"#, ""));
+        try_deploy(&exec, addr(), "web").await;
+        let (_, args) = &exec.calls()[0];
+        assert!(
+            args.windows(2).any(|w| w[0] == "--noproxy" && w[1] == "*"),
+            "{args:?}"
+        );
     }
 
     /// The part that can silently misread a response: whether `-w`'s
