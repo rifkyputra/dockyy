@@ -336,6 +336,27 @@ impl Store {
         .context("reading app config")?
         .transpose()
     }
+
+    /// Every registration, ordered by name. Ordered in SQL rather than by the
+    /// caller so the app list is stable between requests.
+    pub fn list_app_configs(&self) -> Result<Vec<AppConfig>> {
+        let conn = self.conn.lock().expect("store lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, repo_path, route_domain, route_port FROM app_config
+                 ORDER BY name",
+            )
+            .context("preparing app config query")?;
+        let rows = stmt
+            .query_map([], app_config_row)
+            .context("querying app configs")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading app config row")??);
+        }
+        Ok(out)
+    }
 }
 
 /// Read a `(id, app, stage, status, detail)` row. The outer `rusqlite::Result`
@@ -982,5 +1003,52 @@ mod tests {
             store.current_spec("legacy").expect("spec").as_deref(),
             Some("{}")
         );
+    }
+
+    #[test]
+    fn listing_returns_every_registration_ordered_by_name() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store.register_app(&cfg("web", "/srv/web", None)).unwrap();
+        store.register_app(&cfg("api", "/srv/api", None)).unwrap();
+        store.register_app(&cfg("jobs", "/srv/jobs", None)).unwrap();
+
+        let names: Vec<String> = store
+            .list_app_configs()
+            .expect("list")
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["api", "jobs", "web"]);
+    }
+
+    #[test]
+    fn listing_an_empty_store_is_empty_not_an_error() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        assert!(store.list_app_configs().expect("list").is_empty());
+    }
+
+    /// A listed registration carries its route, so the app list can show the
+    /// domain without a second query per row.
+    #[test]
+    fn a_listed_registration_carries_its_route() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        store
+            .register_app(&cfg(
+                "web",
+                "/srv/web",
+                Some(Route {
+                    domain: "example.com".into(),
+                    port: 3000,
+                }),
+            ))
+            .unwrap();
+
+        let all = store.list_app_configs().expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].route.as_ref().expect("route").domain, "example.com");
     }
 }
