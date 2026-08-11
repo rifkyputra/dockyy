@@ -85,7 +85,8 @@ Events reach a sink as `StoredEvent { id, event }` rather than as an `Event` car
 An id only exists after the insert, so a type that carries one cannot be built before persisting:
 persist-before-publish becomes a property of the types rather than a rule to remember.
 
-`Ctx` gains a fourth field. `deploy::run` calls `ctx.sink.emit(&event)` immediately after each
+`Ctx` gains a fifth field, `sink`, alongside `exec`, `fsys`, `store`, and `paths`. `deploy::run`
+calls `ctx.sink.emit(&event)` immediately after each
 existing `append_event`. **Persist first, then publish**: the durable record is what the API serves
 on reconnect, so it must never lag the stream. This ordering is load-bearing, not stylistic — the
 lag-recovery path in the SSE handler depends on it.
@@ -94,7 +95,7 @@ Three implementations:
 
 | Impl | Where | Behaviour |
 |---|---|---|
-| `BroadcastSink` | daemon | wraps `tokio::sync::broadcast::Sender<Event>` |
+| `BroadcastSink` | daemon | wraps `tokio::sync::broadcast::Sender<StoredEvent>` |
 | `NullSink` | cli | drops everything; used by the in-process `apply`/`remove` paths |
 | `FakeSink` | tests | records to a `Vec` for assertions |
 
@@ -189,8 +190,8 @@ Subscribing **before** reading closes the join gap. An event landing between the
 subscribe would otherwise be lost permanently, and it is precisely the stage transition the viewer
 wants. This ordering converts a lost event into a duplicate, which the id filter drops.
 
-Resumption is free once `Event` carries its id: a browser reconnecting sends `Last-Event-ID` and the
-handler replays from there.
+Resumption is free once each event is a `StoredEvent` carrying its id: a browser reconnecting sends
+`Last-Event-ID` and the handler replays from there.
 
 The stream closes when the deploy reaches a terminal status.
 
@@ -284,7 +285,7 @@ untested guard is an assumed one.
 
 | Group | Content |
 |---|---|
-| **H1** | `EventSink` seam, the three impls, `Event.id`, sink calls in `run`/`reconcile`, ADR-0002 fourth clause |
+| **H1** | `EventSink` seam, the three impls, `StoredEvent`, sink calls in `run`/`reconcile`, ADR-0002 fourth clause |
 | **H2** | Store migration: `repo_path`/`route` columns, `register_app`/`app_row`, the idempotency tests |
 | **H3** | `logs` module — `tail` and `search` |
 | **H4** | `crates/daemon`: config, loopback guard, router, JSON API, the global semaphore and the before-queue 409, reconcile-then-bind |

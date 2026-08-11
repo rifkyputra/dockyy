@@ -68,7 +68,7 @@ The invariant, stated so violations are obvious in review:
   parameter "just for this one call" collapses the boundary. Hence stating it as a failure
   condition rather than a preference, and putting it in the plan's global constraints.
 - **No direct side effects outside the two local implementations.** A rule reviewers must
-  enforce, since nothing in the compiler prevents it. Two clauses, both greppable:
+  enforce, since nothing in the compiler prevents it. Four clauses, the first two greppable:
 
   1. `tokio::process::Command` appears only in `exec::local`.
   2. `tokio::fs` appears only in `fs::local` — and neither does `std::fs`, nor
