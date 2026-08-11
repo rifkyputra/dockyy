@@ -58,6 +58,19 @@ pub(crate) fn wants_html(headers: &HeaderMap) -> bool {
         .is_some_and(|a| a.contains("text/html"))
 }
 
+/// The `status`/`status-*` modifier `kuadrat.css` defines one colour for
+/// (running, stopped, failed). Derived from the label text in one place so the
+/// app list and the app detail page, which both show a `WorkloadState` label,
+/// cannot pick different colours for the same word.
+fn status_class(label: &str) -> &'static str {
+    match label {
+        "Running" => "status status-running",
+        "Stopped" | "Not installed" => "status status-stopped",
+        "Failed" => "status status-failed",
+        _ => "status",
+    }
+}
+
 /// Deploys shown on an app's page. Fixed by the design document rather than
 /// left to taste, so the page and anyone reading the spec agree.
 const RECENT_DEPLOYS: usize = 10;
@@ -123,7 +136,7 @@ pub async fn index(State(st): State<AppState>) -> Markup {
                                     "—"
                                 }
                             }
-                            td { (summary.status) }
+                            td class=(status_class(&summary.status)) { (summary.status) }
                         }
                     }
                 }
@@ -221,7 +234,7 @@ pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) ->
         h1 { (config.name) }
         dl id="app-facts" {
             dt { "Status" }
-            dd { (status_label) }
+            dd class=(status_class(status_label)) { (status_label) }
             dt { "Repo" }
             dd { (config.repo_path) }
             dt { "Route" }

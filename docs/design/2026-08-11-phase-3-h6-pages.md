@@ -109,6 +109,14 @@ happened so far and attaches to `/deploy/:id/stream` with `hx-ext="sse"`, `sse-c
 `hx-swap="beforeend"` into the timeline list. The events are durable either way, which is what lets
 one function serve both.
 
+The `sse-connect` URL must tell the stream where that server-rendered timeline ended —
+`/deploy/:id/stream?resume=<last id already on the page>` — because the browser's first
+`EventSource` connection to it carries no `Last-Event-ID` of its own. Without that hint, `events_sse`
+would read `resume` as 0 and replay the whole backlog on top of what the page already rendered, and
+`hx-swap="beforeend"` would append every one of those rows a second time. `Last-Event-ID` still wins
+over the query parameter when a real reconnect carries one, since it reflects what the client has
+actually received rather than what one page render happened to contain.
+
 The status shown in the app list is a host read per request, as `summarise` already does today.
 
 ## Actions
