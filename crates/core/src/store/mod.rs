@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::deploy::{DeployStatus, Stage};
-use crate::events::{Event, EventStatus};
+use crate::events::{Event, EventStatus, StoredEvent};
 
 // Inter-table references (deploys.app, events.deploy_id, locks.deploy_id) are
 // unenforced by design in G1 — SQLite needs PRAGMA foreign_keys and explicit
@@ -229,8 +229,10 @@ impl Store {
         Ok(())
     }
 
-    /// Append one event to a deploy's timeline.
-    pub fn append_event(&self, event: &Event) -> Result<()> {
+    /// Append one event and return the id the store assigned it. That id is
+    /// what the SSE stream deduplicates and resumes on, so it must come from
+    /// the same insert rather than being counted by the caller.
+    pub fn append_event(&self, event: &Event) -> Result<i64> {
         let conn = self.conn.lock().expect("store lock");
         conn.execute(
             "INSERT INTO events (deploy_id, stage, status, detail) VALUES (?1, ?2, ?3, ?4)",
@@ -242,15 +244,15 @@ impl Store {
             ],
         )
         .context("appending event")?;
-        Ok(())
+        Ok(conn.last_insert_rowid())
     }
 
-    /// All events for a deploy, in insertion order.
-    pub fn events_for(&self, deploy_id: i64) -> Result<Vec<Event>> {
+    /// All events for a deploy, in insertion order, each with its id.
+    pub fn events_for(&self, deploy_id: i64) -> Result<Vec<StoredEvent>> {
         let conn = self.conn.lock().expect("store lock");
         let mut stmt = conn
             .prepare(
-                "SELECT deploy_id, stage, status, detail FROM events
+                "SELECT id, deploy_id, stage, status, detail FROM events
                  WHERE deploy_id = ?1 ORDER BY id",
             )
             .context("preparing events query")?;
@@ -298,31 +300,35 @@ fn build_deploy_row(
     })
 }
 
-/// Read an `(deploy_id, stage, status, detail)` event row.
-fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
+fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<StoredEvent>> {
     Ok(build_event(
         row.get(0)?,
         row.get(1)?,
         row.get(2)?,
         row.get(3)?,
+        row.get(4)?,
     ))
 }
 
 fn build_event(
+    id: i64,
     deploy_id: i64,
     stage_s: String,
     status_s: String,
     detail: Option<String>,
-) -> Result<Event> {
+) -> Result<StoredEvent> {
     let stage = Stage::from_str(&stage_s)
         .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown stage {stage_s:?}"))?;
     let status = EventStatus::from_str(&status_s)
         .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}"))?;
-    Ok(Event {
-        deploy_id,
-        stage,
-        status,
-        detail,
+    Ok(StoredEvent {
+        id,
+        event: Event {
+            deploy_id,
+            stage,
+            status,
+            detail,
+        },
     })
 }
 
@@ -522,10 +528,10 @@ mod tests {
 
         let events = store.events_for(id).expect("read");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].stage, Stage::Detect);
-        assert_eq!(events[0].status, EventStatus::Started);
-        assert_eq!(events[1].stage, Stage::Build);
-        assert_eq!(events[1].detail.as_deref(), Some("build broke"));
+        assert_eq!(events[0].event.stage, Stage::Detect);
+        assert_eq!(events[0].event.status, EventStatus::Started);
+        assert_eq!(events[1].event.stage, Stage::Build);
+        assert_eq!(events[1].event.detail.as_deref(), Some("build broke"));
     }
 
     #[test]
@@ -544,6 +550,88 @@ mod tests {
 
         assert_eq!(store.events_for(a).expect("a").len(), 1);
         assert_eq!(store.events_for(b).expect("b").len(), 0);
+    }
+
+    #[test]
+    fn append_event_returns_the_assigned_id() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let id = store.create_deploy("web").unwrap();
+
+        let first = store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Build,
+                status: EventStatus::Started,
+                detail: None,
+            })
+            .expect("append");
+        let second = store
+            .append_event(&Event {
+                deploy_id: id,
+                stage: Stage::Build,
+                status: EventStatus::Succeeded,
+                detail: None,
+            })
+            .expect("append");
+
+        assert!(first > 0, "id must be a real rowid, got {first}");
+        assert!(
+            second > first,
+            "ids must increase: {second} came after {first}"
+        );
+    }
+
+    /// The ids the stream replays from must be the ids the store handed out,
+    /// or a reconnecting browser resumes from the wrong place.
+    #[test]
+    fn events_for_returns_the_same_ids_append_returned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let id = store.create_deploy("web").unwrap();
+
+        let mut appended = Vec::new();
+        for status in [EventStatus::Started, EventStatus::Succeeded] {
+            appended.push(
+                store
+                    .append_event(&Event {
+                        deploy_id: id,
+                        stage: Stage::Apply,
+                        status,
+                        detail: None,
+                    })
+                    .expect("append"),
+            );
+        }
+
+        let read: Vec<i64> = store
+            .events_for(id)
+            .expect("read")
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(read, appended);
+    }
+
+    /// Ids are unique across deploys, not per-deploy — the SSE handler filters
+    /// on `id > last_sent` and would drop events if two deploys reused ids.
+    #[test]
+    fn event_ids_are_unique_across_deploys() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let a = store.create_deploy("a").unwrap();
+        let b = store.create_deploy("b").unwrap();
+
+        let ev = |deploy_id| Event {
+            deploy_id,
+            stage: Stage::Detect,
+            status: EventStatus::Started,
+            detail: None,
+        };
+        let first = store.append_event(&ev(a)).expect("append");
+        let second = store.append_event(&ev(b)).expect("append");
+
+        assert_ne!(first, second);
     }
 
     #[test]
