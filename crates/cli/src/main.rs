@@ -8,6 +8,7 @@ use kuadrat_core::spec::WorkloadSpec;
 use kuadrat_core::workloads::apply::{apply, remove, Paths};
 use kuadrat_core::workloads::query::{list, status};
 
+mod args;
 mod resolve;
 
 #[derive(Parser)]
@@ -101,30 +102,16 @@ async fn main() -> Result<()> {
             let abs = path
                 .canonicalize()
                 .with_context(|| format!("no such path: {}", path.display()))?;
-            let name = abs
-                .file_name()
-                .and_then(|n| n.to_str())
-                .context("path has no final component to name the app after")?;
+            let name = args::app_name(&abs)?;
             let plan = detect(&exec, &fsys, &abs).await?;
             let image = build(&exec, &plan, &slug(name)).await?;
             println!("{image}");
         }
         Command::Deploy { app, path, route } => {
             use kuadrat_core::deploy::{run, Ctx, DeployOutcome};
-            use kuadrat_core::spec::Route;
             use kuadrat_core::store::Store;
 
-            let route_override = match route {
-                Some(s) => {
-                    let (domain, port) =
-                        s.rsplit_once(':').context("--route must be domain:port")?;
-                    Some(Route {
-                        domain: domain.to_string(),
-                        port: port.parse().context("--route port must be a number")?,
-                    })
-                }
-                None => None,
-            };
+            let route_override = route.map(|s| args::parse_route(&s)).transpose()?;
 
             let store = Store::open(&paths.db_path)?;
             let spec = resolve::resolve_spec(&app, &path, &store, route_override)?;

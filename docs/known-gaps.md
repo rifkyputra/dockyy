@@ -147,5 +147,12 @@ same family and should be closed when secrets handling lands.
   `kuadrat_core::workloads::apply::apply`. Add root re-exports while there is still one consumer.
 - **`thiserror` is declared but unused.** Either land the design's stage-tagged error enum in phase
   2 or drop the dependency.
-- **The CLI has no tests of its own.** 68 lines of pure dispatch; add a smoke test when the surface
-  grows.
+- ~~**The CLI has no tests of its own.**~~ **Closed 2026-08-11.** The surface grew as predicted, and
+  two arms had stopped being pure dispatch: `--route` parsing and the app name `build` derives from
+  a repo path. Both moved to `crates/cli/src/args.rs` (`parse_route`, `app_name`) with 13 tests, and
+  the `match` arms call them. The extraction closed three holes the inline versions had: `:3000`
+  parsed as an empty domain, `https://example.com:3000` parsed the scheme as part of the domain, and
+  `:0` parsed as port 0 — each of which would have rendered a Caddy fragment that loads but serves
+  nothing. `app_name` now also rejects a directory whose name slugs to empty, which would have
+  produced the image tag `localhost/kuadrat-:<sha>`. The remaining arms are still pure dispatch and
+  are covered by the acceptance scripts.
