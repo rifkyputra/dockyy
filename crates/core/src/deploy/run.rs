@@ -178,6 +178,7 @@ async fn run_stages(
     ctx.store.put_spec(&spec.name, slug, &json)?;
     ctx.store
         .finish_deploy(deploy_id, DeployStatus::Done, None)?;
+    finished(ctx, deploy_id, DeployStatus::Done, None)?;
     Ok(DeployOutcome::Done { image })
 }
 
@@ -211,6 +212,25 @@ fn emit(
     Ok(())
 }
 
+/// Persist and publish the deploy-level terminal event.
+///
+/// Called immediately after `finish_deploy`, never before: the durable status
+/// must be written before anyone can be told the deploy ended, for the same
+/// reason `emit` persists before publishing. A subscriber that saw "finished"
+/// and then read a row still saying `in_progress` would be reading a lie.
+fn finished(
+    ctx: &Ctx<'_>,
+    deploy_id: i64,
+    status: DeployStatus,
+    detail: Option<String>,
+) -> Result<()> {
+    let stored = ctx
+        .store
+        .append_event(&Event::finished(deploy_id, status, detail))?;
+    ctx.sink.emit(&stored);
+    Ok(())
+}
+
 /// Handle a stage failure: compensate backward. `RolledBack` when the undo
 /// succeeds; `Failed` when compensation also fails (host state is unknown).
 async fn fail(
@@ -235,6 +255,12 @@ async fn fail(
         Ok(()) => {
             ctx.store
                 .finish_deploy(deploy_id, DeployStatus::RolledBack, Some(&cause))?;
+            finished(
+                ctx,
+                deploy_id,
+                DeployStatus::RolledBack,
+                Some(cause.clone()),
+            )?;
             Ok(DeployOutcome::RolledBack {
                 failed_at: stage,
                 cause,
@@ -244,6 +270,7 @@ async fn fail(
             let combined = format!("{cause}; compensation also failed: {comp:#}");
             ctx.store
                 .finish_deploy(deploy_id, DeployStatus::Failed, Some(&combined))?;
+            finished(ctx, deploy_id, DeployStatus::Failed, Some(combined.clone()))?;
             Ok(DeployOutcome::Failed {
                 failed_at: stage,
                 cause: combined,
@@ -827,9 +854,10 @@ mod tests {
         );
     }
 
-    /// The last thing a watcher sees before a rollback is the Failed event for
-    /// the stage that broke — that is what the UI highlights and what the
-    /// webhook forwards.
+    /// The last stage event before a rollback is the Failed event for the
+    /// stage that broke — that is what the UI highlights and what the
+    /// webhook forwards. (The terminal `Finished` event follows it; see
+    /// `a_rolled_back_deploy_says_so_after_the_failed_stage_event`.)
     #[tokio::test]
     async fn a_failed_stage_emits_a_failed_event_naming_that_stage() {
         let h = harness_apply_fails();
@@ -848,7 +876,11 @@ mod tests {
             "{outcome:?}"
         );
 
-        let last = sink.events().last().cloned().expect("at least one event");
+        let events = sink.events();
+        let last = events
+            .get(events.len() - 2)
+            .cloned()
+            .expect("at least two events");
         assert_eq!(
             last.event.kind,
             EventKind::Stage {
@@ -941,5 +973,92 @@ mod tests {
         .await
         .expect("run");
         assert!(matches!(outcome, DeployOutcome::Done { .. }), "{outcome:?}");
+    }
+
+    /// The gap this closes: before it, a `Done` deploy was indistinguishable
+    /// from one that stalled after the last stage event.
+    #[tokio::test]
+    async fn a_successful_deploy_emits_a_terminal_done_event_last() {
+        let h = harness_ok();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+        run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("deploy");
+
+        assert_eq!(sink.terminal(), Some(DeployStatus::Done));
+        let last = sink.events().last().cloned().expect("events");
+        assert_eq!(
+            last.event.kind,
+            EventKind::Finished {
+                status: DeployStatus::Done
+            },
+            "the terminal event must be the last thing a watcher sees"
+        );
+    }
+
+    /// The other half of the gap: a rollback that *succeeded* was invisible.
+    /// A watcher saw "Apply failed" and then nothing.
+    #[tokio::test]
+    async fn a_rolled_back_deploy_says_so_after_the_failed_stage_event() {
+        let h = harness_apply_fails();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+        run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("deploy");
+
+        let kinds: Vec<EventKind> = sink.events().iter().map(|e| e.event.kind).collect();
+        let last_two = &kinds[kinds.len() - 2..];
+        assert_eq!(
+            last_two,
+            [
+                EventKind::Stage {
+                    stage: Stage::Apply,
+                    status: EventStatus::Failed
+                },
+                EventKind::Finished {
+                    status: DeployStatus::RolledBack
+                },
+            ]
+        );
+    }
+
+    /// The terminal event is durable like every other one, and carries the
+    /// cause the deploys row carries.
+    #[tokio::test]
+    async fn the_terminal_event_is_stored_with_the_failure_cause() {
+        let h = harness_apply_fails();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+        run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("deploy");
+
+        let deploy_id = emitted_deploy_id(&sink);
+        let stored = h.store.events_for(deploy_id).expect("events");
+        let last = stored.last().expect("at least one event");
+        assert_eq!(
+            last.event.kind,
+            EventKind::Finished {
+                status: DeployStatus::RolledBack
+            }
+        );
+        assert!(
+            last.event.detail.is_some(),
+            "the terminal event must carry the cause"
+        );
     }
 }
