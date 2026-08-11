@@ -22,6 +22,10 @@ percent-encoding = "2.3"
 [dev-dependencies]
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
+# `test-util` only: unifies into test builds via the same tokio crate already
+# a normal dependency above, so the retry test can pause the clock instead of
+# a real three-second sleep. Not present in the production binary.
+tokio = { workspace = true, features = ["test-util"] }
 # Already a workspace dependency of kuadrat-core (its own tests use the same
 # raw-connection trick to simulate a broken schema) — reused here to break the
 # store out from under a live `Store`, not a new crate in the dependency tree.

@@ -6,8 +6,11 @@
 //! shelling out to `curl`. That buys no new dependency and a sender that is
 //! testable with `FakeExecutor` rather than a fake HTTP server.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use kuadrat_core::events::{EventKind, EventStatus, StoredEvent};
+use kuadrat_core::exec::Executor;
 
 /// Where to POST. Absent configuration means the sender is off — that is not
 /// an error and must not warn on every start.
@@ -134,11 +137,73 @@ pub fn curl_config(url: &str, body: &str) -> String {
     )
 }
 
+/// How many times to try, and how long to wait between tries.
+///
+/// Fixed, not exponential: the whole budget is three seconds, so a backoff
+/// curve would be arithmetic without a decision behind it. Three seconds is
+/// also the ceiling on how far this subscriber lags the hub, which matters
+/// because a lagging subscriber is the failure the broadcast channel reports.
+const ATTEMPTS: usize = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Deliver `body` to `hook` through `curl`, retrying up to [`ATTEMPTS`] times.
+///
+/// The URL and body reach `curl` on stdin as a `--config` document (see
+/// [`curl_config`]) — never on argv, which is world-readable through `ps`.
+/// `--fail` makes an HTTP error status a non-zero exit rather than a quiet
+/// success; `--silent` and `--show-error` keep curl's own progress meter out
+/// of the way while still reporting a real error; `--max-time` bounds a single
+/// attempt so a stalled connection can't itself blow the retry budget.
+///
+/// On failure this returns the last attempt's error so the caller can log
+/// it — but the caller is a detached task with a deploy long finished by the
+/// time this settles, so nothing here ever blocks or fails a deploy. The
+/// returned error carries curl's stderr, never the config document, so the
+/// URL's secret token never appears in a log line either.
+pub async fn send(exec: &dyn Executor, hook: &Webhook, body: &str) -> Result<()> {
+    let config = curl_config(hook.url(), body);
+    let args: Vec<String> = [
+        "--config",
+        "-",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "10",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let mut last_err = anyhow::anyhow!("webhook delivery attempted zero times");
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+        match exec.run_with_stdin("curl", &args, &config).await {
+            Ok(out) if out.success() => return Ok(()),
+            Ok(out) => last_err = anyhow::anyhow!("{}", out.stderr.trim()),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kuadrat_core::deploy::{DeployStatus, Stage};
     use kuadrat_core::events::{Event, EventStatus};
+    use kuadrat_core::exec::fake::FakeExecutor;
+    use kuadrat_core::exec::CommandOutput;
+
+    fn out(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
 
     fn stored(id: i64, kind_of: &str) -> StoredEvent {
         let event = match kind_of {
@@ -290,5 +355,71 @@ mod tests {
         std::env::remove_var("KUADRAT_WEBHOOK_URL");
         std::env::remove_var("KUADRAT_WEBHOOK_URL_FILE");
         assert!(Webhook::from_env().expect("read").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_successful_post_runs_curl_once_with_the_url_on_stdin() {
+        let exec = FakeExecutor::new();
+        exec.expect("curl", out(0, "", ""));
+
+        send(
+            &exec,
+            &Webhook::new("https://example.com/h/TOKEN".into()),
+            r#"{"text":"x"}"#,
+        )
+        .await
+        .expect("send");
+
+        let calls = exec.calls();
+        assert_eq!(calls.len(), 1);
+        let (program, args) = &calls[0];
+        assert_eq!(program, "curl");
+        assert!(
+            !args.iter().any(|a| a.contains("TOKEN")),
+            "the token must never reach argv: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--config"), "{args:?}");
+        assert!(
+            exec.stdins()[0].contains("TOKEN"),
+            "the URL must arrive on stdin instead"
+        );
+    }
+
+    /// Best-effort with a bounded retry: three attempts, then give up. The
+    /// deploy is long finished by then and nothing is waiting on this.
+    ///
+    /// Runs on a paused clock (`start_paused = true`): tokio auto-advances
+    /// virtual time past `RETRY_DELAY`'s sleeps whenever the only pending
+    /// thing is a timer, so this test verifies the real three-attempt, one
+    /// second apart schedule without costing two seconds of wall time.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_post_is_retried_three_times_and_then_dropped() {
+        let exec = FakeExecutor::new();
+        exec.expect("curl", out(7, "", "could not connect"));
+
+        let result = send(&exec, &Webhook::new("https://example.com/h".into()), "{}").await;
+
+        assert!(
+            result.is_err(),
+            "the caller is told, even though it will only log it"
+        );
+        assert_eq!(
+            exec.calls().len(),
+            3,
+            "three attempts, not more and not fewer"
+        );
+    }
+
+    /// An HTTP error is a failure like any other here — the doorbell did not
+    /// ring. `--fail` is what makes curl report a 4xx as a non-zero exit.
+    #[tokio::test]
+    async fn curl_is_asked_to_treat_an_http_error_as_a_failure() {
+        let exec = FakeExecutor::new();
+        exec.expect("curl", out(0, "", ""));
+        send(&exec, &Webhook::new("https://example.com/h".into()), "{}")
+            .await
+            .expect("send");
+        let (_, args) = &exec.calls()[0];
+        assert!(args.iter().any(|a| a == "--fail"), "{args:?}");
     }
 }
