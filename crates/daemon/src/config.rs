@@ -9,7 +9,6 @@ use anyhow::{bail, Result};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
-    pub socket: Option<PathBuf>,
     /// Relocates every managed path under one directory; `None` uses the real
     /// host locations (`/etc/containers/systemd`, `/var/lib/kuadrat`, …).
     pub root: Option<PathBuf>,
@@ -23,7 +22,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)),
-            socket: None,
             root: None,
         }
     }

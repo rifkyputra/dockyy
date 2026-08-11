@@ -52,6 +52,14 @@ enum Command {
     },
     /// Recover from crashed deploys: roll back anything left in progress
     Reconcile,
+    /// Run the HTTP daemon: the API, the pages, and the event stream
+    Serve {
+        /// Address to listen on. Loopback only — the daemon has no
+        /// authentication, so it refuses to bind anything else. Reach it
+        /// remotely with an SSH tunnel or a VPN.
+        #[arg(long, default_value_t = args::default_listen())]
+        listen: std::net::SocketAddr,
+    },
 }
 
 #[derive(Subcommand)]
@@ -152,6 +160,13 @@ async fn main() -> Result<()> {
                     println!("removed secret {name}");
                 }
             }
+        }
+        Command::Serve { listen } => {
+            kuadrat_daemon::serve(kuadrat_daemon::Config {
+                listen,
+                root: cli.root,
+            })
+            .await?;
         }
         Command::Reconcile => {
             use kuadrat_core::deploy::{reconcile, Ctx};

@@ -302,7 +302,6 @@ happened yet to undo — and is recorded here so it does not later read as a bug
 
 ```
 kuadrat serve --listen 127.0.0.1:7457 \
-              --socket /run/kuadrat/kuadrat.sock \
               --root /etc/containers/systemd
 ```
 

@@ -6,10 +6,18 @@
 //! a malformed route must not reach the gateway as an empty Caddy site address,
 //! and an unnameable path must not become the image tag `localhost/kuadrat-:sha`.
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use kuadrat_core::spec::{slug, Route};
+
+/// The default `--listen` address for `kuadrat serve`: loopback on the
+/// documented port. A function rather than a string literal so the CLI and
+/// the daemon's own default (`Config::default`) cannot drift apart silently.
+pub fn default_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], kuadrat_daemon::config::DEFAULT_PORT))
+}
 
 /// Parse `--route domain:port` into a [`Route`].
 ///
@@ -142,5 +150,15 @@ mod tests {
         // "localhost/kuadrat-:<sha>" and the unit "kuadrat-.container".
         let err = app_name(Path::new("/home/me/---")).expect_err("empty slug");
         assert!(err.to_string().contains("empty app name"), "was: {err}");
+    }
+
+    /// The guard lives in the daemon, but the CLI must not mangle the address
+    /// before it gets there.
+    #[test]
+    fn serve_defaults_to_loopback_on_the_documented_port() {
+        assert_eq!(
+            default_listen(),
+            "127.0.0.1:7457".parse::<SocketAddr>().unwrap()
+        );
     }
 }
