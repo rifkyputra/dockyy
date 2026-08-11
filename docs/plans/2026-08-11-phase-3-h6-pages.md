@@ -14,7 +14,7 @@ the JSON stream and the new HTML stream share one implementation of the part tha
 right. `pages.rs` renders with `maud` and holds the page handlers. `assets.rs` serves the embedded
 htmx, its SSE extension, and the stylesheet.
 
-**Tech Stack:** Rust 2021, axum 0.7, `maud` 0.27 (`axum` feature), htmx 2.0.10 + `htmx-ext-sse`
+**Tech Stack:** Rust 2021, axum 0.7, `maud` 0.26 (`axum` feature), htmx 2.0.10 + `htmx-ext-sse`
 2.2.4 (vendored), `async-stream`, `rusqlite`.
 
 **Design:** [`docs/design/2026-08-11-phase-3-h6-pages.md`](../design/2026-08-11-phase-3-h6-pages.md),
@@ -38,8 +38,10 @@ which in turn refines [`2026-08-11-phase-3-daemon-and-surfaces.md`](../design/20
 - **Prefix cargo commands with `PATH=$HOME/.cargo/bin:$PATH`.**
 - **Baselines, measured at `5217477`:** `kuadrat` (cli) **17**, `kuadrat_core` **182**,
   `kuadrat_daemon` **38**.
-- **New dependencies, daemon-only:** `maud = { version = "0.27", features = ["axum"] }`. Nothing
-  else, and nothing new in `core`.
+- **New dependencies, daemon-only:** `maud = { version = "0.26", features = ["axum"] }`. Nothing
+  else, and nothing new in `core`. **Not 0.27** — its `axum` feature depends on `axum-core 0.5`
+  (axum 0.8), while this workspace is on axum 0.7 / axum-core 0.4, and the build fails. 0.26 is the
+  version whose `axum` feature matches axum 0.7.
 - **No secret values** in logs, error messages, or committed files.
 - Commit after every task with a Conventional Commit subject.
 
@@ -621,7 +623,8 @@ git commit -m "feat(core): list an app's recent deploys"
 
 - [ ] **Step 1: Add the dependency**
 
-`crates/daemon/Cargo.toml`: `maud = { version = "0.27", features = ["axum"] }`.
+`crates/daemon/Cargo.toml`: `maud = { version = "0.26", features = ["axum"] }` — see the Global
+Constraints note on why not 0.27.
 
 - [ ] **Step 2: Write the failing tests**
 
