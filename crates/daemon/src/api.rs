@@ -21,6 +21,13 @@ use crate::stream::events_sse;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(crate::pages::index))
+        // Stub: only ever 404s in this task. Its real body — the app detail
+        // page — is Task 6; it exists here so the HTML 404 has a route to hit.
+        .route(
+            "/app/:name",
+            get(|| async { crate::pages::not_found("app") }),
+        )
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
@@ -289,7 +296,7 @@ fn registration(st: &AppState, name: &str) -> ApiResult<AppConfig> {
 /// A registration plus the host's current answer for it. A status read that
 /// fails is reported as a status, not as a failed request — one unreadable unit
 /// must not blank the whole app list.
-async fn summarise(st: &AppState, c: AppConfig) -> AppSummary {
+pub(crate) async fn summarise(st: &AppState, c: AppConfig) -> AppSummary {
     let state = match status(&*st.exec, &*st.fsys, &st.paths, &c.name).await {
         Ok(s) => s.label().to_string(),
         Err(_) => "Unknown".to_string(),
@@ -405,6 +412,13 @@ pub(crate) mod tests {
             .await
             .expect("body");
         serde_json::from_slice(&bytes).expect("json")
+    }
+
+    async fn body_text(res: Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        String::from_utf8(bytes.to_vec()).expect("utf8")
     }
 
     #[tokio::test]
@@ -1002,5 +1016,73 @@ pub(crate) mod tests {
             .expect("send");
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(sse_data(res).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_index_lists_a_registered_app_with_its_status() {
+        let (app, store, _hub, _d) = harness_parts();
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: "/srv/web".into(),
+                route: None,
+            })
+            .expect("register");
+
+        let res = app.oneshot(get("/")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        assert!(body.contains("web"), "app name missing: {body}");
+        assert!(body.contains("/srv/web"), "repo path missing");
+    }
+
+    #[tokio::test]
+    async fn the_index_says_so_when_nothing_is_registered() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let body = body_text(app.oneshot(get("/")).await.expect("send")).await;
+        assert!(
+            body.to_lowercase().contains("no apps"),
+            "an empty list must say it is empty, not render a bare table: {body}"
+        );
+    }
+
+    /// The least trusted data in the system reaches these pages: app names come
+    /// from an operator, but log lines come from whatever the deployed
+    /// application wrote. If anything here ever renders raw, an app that logs
+    /// markup rewrites the operator's console. `maud` escapes by default; this
+    /// pins that nothing later opts out.
+    #[tokio::test]
+    async fn interpolated_values_are_escaped_not_rendered() {
+        let (app, store, _hub, _d) = harness_parts();
+        store
+            .register_app(&AppConfig {
+                name: "<script>alert(1)</script>".into(),
+                repo_path: "/srv/x".into(),
+                route: None,
+            })
+            .expect("register");
+
+        let body = body_text(app.oneshot(get("/")).await.expect("send")).await;
+        assert!(
+            !body.contains("<script>alert(1)</script>"),
+            "raw markup reached the page: {body}"
+        );
+        assert!(
+            body.contains("&lt;script&gt;"),
+            "expected escaped form: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_page_route_answers_html_not_json() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let res = app.oneshot(get("/app/nope")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert!(res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("text/html"));
     }
 }

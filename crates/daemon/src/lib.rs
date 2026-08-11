@@ -11,6 +11,7 @@ pub mod assets;
 pub mod config;
 pub mod error;
 pub mod hub;
+pub mod pages;
 pub mod state;
 pub mod stream;
 
