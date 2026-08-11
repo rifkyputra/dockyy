@@ -202,3 +202,27 @@ things carry forward: operationally, `SYSTEMD_LOG_LEVEL` must not be set to `war
 for the daemon's process; and structurally, pinning `SYSTEMD_LOG_LEVEL=info` and `LC_ALL=C` for
 the journalctl child specifically belongs with a future `Executor` env parameter, not a
 workaround in this module.
+
+## From H6 — vendored frontend assets
+
+`crates/daemon/assets/` carries htmx 2.0.10 and `htmx-ext-sse` 2.2.4, vendored because the daemon
+binds loopback on a host that may have no outbound network. They are the only third-party code in
+the repository and nothing updates them automatically: a published security advisory against either
+will not surface here. `assets/PROVENANCE.md` records the upstream URL, version, and SHA-256 of
+each, which is what makes an update auditable — check it when either project publishes a release.
+
+## From H6 — the form routes have no CSRF defence
+
+`POST /apps` and the browser branch of `POST /api/apps/:name/deploy` are plain HTML forms: no CSRF
+token, no `Origin` or `SameSite` check. They are the first state-changing routes this daemon exposes
+to a browser.
+
+Loopback-only is not by itself a defence here. Any page open in the operator's browser can submit a
+cross-origin form POST to `127.0.0.1` — the browser will send it, and nothing on these routes
+distinguishes it from a click on kuadrat's own page. What loopback does buy is that the attacker
+must already have the operator loading their page; what it does not buy is immunity.
+
+Deliberately not fixed in H6: the phase binds loopback and ships no authentication at all, so a
+token would be the only control on a surface that has no others, and it would suggest a boundary
+that is not there. It must be fixed in the same change that gives the daemon authentication or
+reachability beyond loopback — whichever comes first — and not after.

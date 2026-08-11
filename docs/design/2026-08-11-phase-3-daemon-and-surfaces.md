@@ -244,6 +244,11 @@ Resumption is free once each event is a `StoredEvent` carrying its id: a browser
 
 The stream closes when the deploy reaches a terminal status.
 
+A closed stream is a dropped connection as far as `EventSource` is concerned, and it reconnects. So
+a stream with nothing left to send — a terminal deploy whose events the client has all seen —
+answers `204 No Content`, which the HTML specification defines as "do not reconnect". Without it a
+finished deploy left open in a tab polls the daemon forever.
+
 ## Error handling
 
 **A failed deploy is not an HTTP error.** `POST /api/apps/:name/deploy` succeeds as soon as the
@@ -339,7 +344,7 @@ untested guard is an assumed one.
 | **H3** | `logs` module — `tail` and `search` |
 | **H4** | `crates/daemon`: config, loopback guard, router, JSON API, the global semaphore and the before-queue 409, reconcile-then-bind |
 | **H5** | SSE: the deploy-level terminal event, broadcast hub, backlog-then-live, dedupe, lag recovery, `Last-Event-ID` |
-| **H6** | The three htmx pages and embedded assets |
+| **H6** | The three htmx pages, embedded assets, the page-facing HTML event stream, and the browser half of deploy and registration |
 | **H7** | Webhook sender; `kuadrat serve` wiring, the systemd unit, `kuadrat deploy` as an API client, `serve-acceptance.sh` |
 
 H1–H3 are `core` work and independent of each other, so they can land in any order. H4 depends on H2
