@@ -11,6 +11,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use kuadrat_core::events::{EventKind, EventStatus, StoredEvent};
 use kuadrat_core::exec::Executor;
+use tokio::sync::broadcast::error::RecvError;
+
+use crate::state::AppState;
 
 /// Where to POST. Absent configuration means the sender is off — that is not
 /// an error and must not warn on every start.
@@ -189,13 +192,64 @@ pub async fn send(exec: &dyn Executor, hook: &Webhook, body: &str) -> Result<()>
     Err(last_err)
 }
 
+/// Subscribe to the hub and send a message for every notable event.
+///
+/// Its own task, which is the shape `EventSink::emit` was designed for: emit
+/// is synchronous and infallible so a deploy cannot be slowed or failed by
+/// whoever is listening. All the waiting — the POST, the retry — happens here.
+pub fn spawn(state: &AppState, hook: Webhook) {
+    let mut rx = state.hub.subscribe();
+    let exec = state.exec.clone();
+    let store = state.store.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                // A lagged subscriber simply misses those events. The SSE
+                // stream recovers a lag by re-reading SQLite because a viewer
+                // must not miss a stage; a doorbell is different — a missed
+                // ring is not worth that complexity, and the events table
+                // remains the record regardless. Skip and keep listening.
+                Err(RecvError::Lagged(_)) => continue,
+                // Every sender is gone: the daemon is shutting down.
+                Err(RecvError::Closed) => return,
+            };
+
+            if !is_notable(&ev) {
+                continue;
+            }
+
+            let app = match store.deploy(ev.event.deploy_id) {
+                Ok(Some(row)) => row.app,
+                // The deploy row is gone or unreadable. Not worth taking the
+                // task down over: skip this event and keep listening for the
+                // next one.
+                Ok(None) | Err(_) => continue,
+            };
+
+            let body = payload(&app, &ev);
+            if let Err(e) = send(exec.as_ref(), &hook, &body).await {
+                eprintln!("webhook delivery failed: {e:#}");
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kuadrat_core::deploy::{DeployStatus, Stage};
-    use kuadrat_core::events::{Event, EventStatus};
+    use kuadrat_core::events::{Event, EventSink, EventStatus};
     use kuadrat_core::exec::fake::FakeExecutor;
     use kuadrat_core::exec::CommandOutput;
+    use kuadrat_core::fs::fake::FakeFileSystem;
+    use kuadrat_core::store::Store;
+    use kuadrat_core::workloads::paths::Paths;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use crate::state::AppState;
 
     fn out(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
         CommandOutput {
@@ -421,5 +475,123 @@ mod tests {
             .expect("send");
         let (_, args) = &exec.calls()[0];
         assert!(args.iter().any(|a| a == "--fail"), "{args:?}");
+    }
+
+    /// An `AppState` over fakes and a temp-file store, plus the concrete
+    /// `FakeExecutor` behind `state.exec` so a test can inspect its calls.
+    /// `state.exec` only exposes `Arc<dyn Executor>`, which cannot be asked
+    /// for its call log, so the concrete handle is returned alongside it.
+    fn webhook_harness() -> (AppState, Arc<FakeExecutor>, TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open(&dir.path().join("k.db")).expect("store"));
+        let exec = Arc::new(FakeExecutor::new());
+        exec.expect("curl", out(0, "", ""));
+        let state = AppState::new(
+            exec.clone(),
+            Arc::new(FakeFileSystem::new()),
+            store,
+            Paths::rooted(dir.path()),
+        );
+        (state, exec, dir)
+    }
+
+    /// Polls `exec` for `n` recorded calls rather than sleeping a fixed
+    /// amount: the subscriber task runs concurrently with the test, so a
+    /// fixed sleep is slow when it passes and flaky when it does not. Panics
+    /// past a one-second budget, which is generous next to how fast a task
+    /// switch actually takes.
+    async fn await_calls(exec: &FakeExecutor, n: usize) -> Vec<(String, Vec<String>)> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let calls = exec.calls();
+            if calls.len() >= n {
+                return calls;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for {n} call(s); got {} instead",
+                    calls.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The event's app name is not on the event — it is on the deploy row —
+    /// so the subscriber resolves it. A deploy whose row has vanished must not
+    /// take the task down with it.
+    #[tokio::test]
+    async fn a_notable_event_becomes_one_curl_call_naming_its_app() {
+        let (state, exec, _dir) = webhook_harness();
+        let id = state.store.create_deploy("web").expect("create");
+
+        spawn(&state, Webhook::new("https://example.com/h".into()));
+
+        let ev = state
+            .store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        state.hub.emit(&ev);
+
+        // The task runs concurrently; wait for the call rather than sleeping a
+        // fixed amount.
+        let calls = await_calls(&exec, 1).await;
+        assert_eq!(calls.len(), 1);
+        let (program, _) = &calls[0];
+        assert_eq!(program, "curl");
+        assert!(
+            exec.stdins()[0].contains("web"),
+            "the app name must reach the payload: {:?}",
+            exec.stdins()
+        );
+    }
+
+    /// Ordinary stage traffic (`Started`, `Succeeded`) is not notable and must
+    /// send nothing. A sentinel `Finished` event is appended afterward and
+    /// awaited: since the subscriber is one task reading one receiver, seeing
+    /// exactly the sentinel's single call once it lands proves the two stage
+    /// events ahead of it produced none — without an arbitrary sleep to prove
+    /// a negative.
+    #[tokio::test]
+    async fn ordinary_stage_traffic_sends_nothing() {
+        let (state, exec, _dir) = webhook_harness();
+        let id = state.store.create_deploy("web").expect("create");
+
+        spawn(&state, Webhook::new("https://example.com/h".into()));
+
+        let started = state
+            .store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Apply,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        state.hub.emit(&started);
+
+        let succeeded = state
+            .store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Apply,
+                EventStatus::Succeeded,
+                None,
+            ))
+            .expect("append");
+        state.hub.emit(&succeeded);
+
+        let sentinel = state
+            .store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        state.hub.emit(&sentinel);
+
+        let calls = await_calls(&exec, 1).await;
+        assert_eq!(
+            calls.len(),
+            1,
+            "only the sentinel should have produced a call"
+        );
     }
 }

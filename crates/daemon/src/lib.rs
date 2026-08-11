@@ -57,6 +57,12 @@ pub async fn serve(config: Config) -> Result<()> {
         eprintln!("reconciled: {outcome:?}");
     }
 
+    match webhook::Webhook::from_env() {
+        Ok(Some(hook)) => webhook::spawn(&state, hook),
+        Ok(None) => {} // Not configured. Not an error, and not worth a line on every start.
+        Err(e) => eprintln!("webhook disabled: {e:#}"),
+    }
+
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding {}", config.listen))?;
