@@ -3,6 +3,15 @@
 Carried forward from the phase-1 whole-branch review and its fix wave. Each entry is real, judged
 deferrable at the time, and worth re-reading before the phase it names.
 
+## From G4b — a `release_lock` DB error drops the terminal outcome
+
+`deploy::run` propagates `release_lock(&name)?` after `run_stages`. If the SQLite `DELETE` fails
+(disk full, corruption), `run` returns that error and the real `Done`/`RolledBack`/`Failed` outcome
+is dropped, and the lock stays held until G5's reconciliation releases it. A local `DELETE` failing
+is rare, and reconciliation recovers a stuck lock, so this was deferred. A clean fix wants a way to
+surface the real outcome while still signalling the release failure — worth a look once core has any
+logging/telemetry, or fold into G5 where reconciliation already owns stuck locks.
+
 ## Acceptance — PASSED 2026-08-10
 
 Phase 1's done criterion is met. `scripts/acceptance.sh` ran on a real host (Ubuntu 24.04.4,
