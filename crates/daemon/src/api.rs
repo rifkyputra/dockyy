@@ -23,6 +23,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(crate::pages::index))
         .route("/app/:name", get(crate::pages::app_detail))
+        .route("/deploy/:id", get(crate::pages::deploy_detail))
+        .route("/deploy/:id/stream", get(crate::pages::deploy_stream))
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
@@ -450,7 +452,7 @@ pub(crate) mod tests {
         serde_json::from_slice(&bytes).expect("json")
     }
 
-    async fn body_text(res: Response) -> String {
+    pub(crate) async fn body_text(res: Response) -> String {
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
             .await
             .expect("body");
@@ -648,10 +650,16 @@ pub(crate) mod tests {
         assert_eq!(body["events"][0]["status"], "started");
     }
 
-    /// Read an SSE body to completion and return the `data:` payloads. This
-    /// only terminates because the stream closes on the terminal event — which
-    /// is the property being tested as much as the contents are.
-    async fn sse_data(res: Response) -> Vec<serde_json::Value> {
+    /// Read an SSE body to completion and return the raw `data:` payloads, one
+    /// per event. This only terminates because the stream closes on the
+    /// terminal event — which is the property being tested as much as the
+    /// contents are.
+    ///
+    /// Shared by `sse_data` below (the JSON API, one parse away from here) and
+    /// `pages::tests::sse_raw_data` (the HTML stream, whose fragments are used
+    /// as-is) — the same body-draining logic either way, differing only in
+    /// what happens to each payload afterward.
+    pub(crate) async fn sse_raw_data(res: Response) -> Vec<String> {
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
             .await
             .expect("body");
@@ -659,11 +667,19 @@ pub(crate) mod tests {
             .expect("utf8")
             .lines()
             .filter_map(|l| l.strip_prefix("data: "))
+            .map(|d| d.to_string())
+            .collect()
+    }
+
+    async fn sse_data(res: Response) -> Vec<serde_json::Value> {
+        sse_raw_data(res)
+            .await
+            .iter()
             .map(|d| serde_json::from_str(d).expect("json"))
             .collect()
     }
 
-    fn stage_event(store: &Store, id: i64, stage: Stage, status: EventStatus) {
+    pub(crate) fn stage_event(store: &Store, id: i64, stage: Stage, status: EventStatus) {
         store
             .append_event(&Event::for_stage(id, stage, status, None))
             .expect("append");
