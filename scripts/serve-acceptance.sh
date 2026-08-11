@@ -29,8 +29,29 @@ DAEMON_PID=""
 HOOK_PID=""
 
 pass=0; fail=0
+EVIDENCE_DIR=""
 ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
+bad() { echo "  FAIL  $1"; fail=$((fail+1)); capture_evidence; }
+
+# On a failing check, snapshot whatever diagnostic state still exists — the
+# unit, the container, and the journal — into a directory `cleanup` does not
+# touch. Without this, cleanup's `trap ... EXIT` removes the app and the temp
+# dir on every exit, including a failing one, so twice now the evidence
+# needed to diagnose a failure was gone before anyone could look. Re-running
+# this on every `bad()` call (not just the first) keeps the snapshot current
+# as later checks run, at the cost of overwriting earlier failures' captures
+# with the same files — acceptable since the files describe live host state,
+# not per-check history.
+capture_evidence() {
+  if [ -z "$EVIDENCE_DIR" ]; then
+    EVIDENCE_DIR="/tmp/kuadrat-acceptance-$(date +%Y%m%dT%H%M%S)"
+  fi
+  mkdir -p "$EVIDENCE_DIR"
+  cat "/etc/containers/systemd/${UNIT}.container" > "$EVIDENCE_DIR/unit.container" 2>&1
+  systemctl status "$UNIT" > "$EVIDENCE_DIR/systemctl-status.txt" 2>&1
+  journalctl -u "$UNIT" -n 100 --no-pager > "$EVIDENCE_DIR/journal.txt" 2>&1
+  podman ps -a --filter "name=${UNIT}" > "$EVIDENCE_DIR/podman-ps.txt" 2>&1
+}
 
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" >/dev/null 2>&1
@@ -221,5 +242,10 @@ echo "$OUT8" | grep -q "no daemon running; deploying locally" && echo "$OUT8" | 
 # --------------------------------------------------------------------------
 echo "== RESULT"
 echo "  passed: $pass    failed: $fail"
-[ $fail -eq 0 ] && echo "  H7 SERVE ACCEPTANCE: PASS" || echo "  H7 SERVE ACCEPTANCE: FAIL"
+if [ $fail -eq 0 ]; then
+  echo "  H7 SERVE ACCEPTANCE: PASS"
+else
+  echo "  H7 SERVE ACCEPTANCE: FAIL"
+  [ -n "$EVIDENCE_DIR" ] && echo "  evidence captured in: $EVIDENCE_DIR"
+fi
 exit $fail
