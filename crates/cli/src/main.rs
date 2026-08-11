@@ -9,6 +9,7 @@ use kuadrat_core::workloads::apply::{apply, remove, Paths};
 use kuadrat_core::workloads::query::{list, status};
 
 mod args;
+mod daemon_client;
 mod resolve;
 
 #[derive(Parser)]
@@ -120,6 +121,27 @@ async fn main() -> Result<()> {
             use kuadrat_core::store::Store;
 
             let route_override = route.map(|s| args::parse_route(&s)).transpose()?;
+
+            // Prefer a running daemon: it queues behind the global
+            // one-at-a-time semaphore and gives this deploy an addressable
+            // `/deploy/:id` page. Only an unreachable daemon falls back to
+            // running in-process — a refusal is the daemon's answer and is
+            // reported, never retried locally. See `daemon_client` for why.
+            let listen = args::default_listen();
+            match daemon_client::try_deploy(&exec, listen, &app).await {
+                daemon_client::Handoff::Accepted { deploy_id } => {
+                    println!("queued as deploy {deploy_id} on the running daemon");
+                    println!("http://{listen}/deploy/{deploy_id}");
+                    return Ok(());
+                }
+                daemon_client::Handoff::Refused { status, message } => {
+                    eprintln!("daemon refused the deploy ({status}): {message}");
+                    std::process::exit(1);
+                }
+                daemon_client::Handoff::Unreachable => {
+                    println!("no daemon running; deploying locally");
+                }
+            }
 
             let store = Store::open(&paths.db_path)?;
             let spec = resolve::resolve_spec(&app, &path, &store, route_override)?;
