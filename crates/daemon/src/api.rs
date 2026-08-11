@@ -288,16 +288,29 @@ async fn get_deploy(
 /// One deploy's events: the stored backlog, then everything that happens
 /// after, closing when the deploy ends.
 ///
-/// **The subscribe happens before the backlog read, and the order is
-/// load-bearing.** An event landing between the read and the subscribe would
-/// be lost permanently, and it is exactly the stage transition the viewer is
-/// waiting for. Subscribing first turns that loss into a duplicate, and the
-/// `id > last_sent` filter drops duplicates. A duplicate is recoverable; a gap
-/// is not.
+/// **The subscribe happens before any read — the deploy row and the backlog
+/// both — and the order is load-bearing.** An event landing between a read
+/// and the subscribe would be lost permanently, and it is exactly the stage
+/// transition the viewer is waiting for. Subscribing first turns that loss
+/// into a duplicate, and the `id > last_sent` filter drops duplicates. A
+/// duplicate is recoverable; a gap is not.
+///
+/// This applies to the row fetch too, not just the backlog: `already_terminal`
+/// is read off `row.status`, and a stale pre-subscribe snapshot of that status
+/// can miss a terminal transition that appends no event — `reserve` rejecting
+/// a duplicate calls `finish_deploy` and emits nothing. Fetch the row first
+/// and a deploy could flip to terminal in the gap before the subscribe, with
+/// no event in the backlog and nothing published to the hub to say so; the
+/// stream would then wait on `rx.recv()` for a deploy that can never speak
+/// again.
 async fn deploy_events(
     State(st): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    // Subscribing has no side effect and costs nothing, so it happens before
+    // every other step here — including the 404 check below.
+    let mut rx = st.hub.subscribe();
+
     // 404 before a stream is opened. An unknown id must fail as a request —
     // a stream that opens and then says nothing is indistinguishable, to a
     // browser, from a deploy that is simply slow.
@@ -306,8 +319,6 @@ async fn deploy_events(
         .deploy(id)
         .map_err(|e| ApiError::internal(format!("reading deploy {id}: {e:#}")))?
         .ok_or_else(|| ApiError::not_found(format!("no deploy {id}")))?;
-
-    let mut rx = st.hub.subscribe();
 
     let backlog = st
         .store
