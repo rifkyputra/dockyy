@@ -8,8 +8,10 @@
 
 pub mod api;
 pub mod config;
+pub mod error;
 pub mod hub;
 pub mod state;
+pub mod stream;
 
 use std::sync::Arc;
 

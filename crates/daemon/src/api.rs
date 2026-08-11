@@ -1,25 +1,23 @@
 //! The JSON API. Every handler is a thin shell over `core`; nothing here
 //! decides anything the CLI would decide differently.
 
-use std::convert::Infallible;
-
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{self, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::sse;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_core::Stream;
-use kuadrat_core::deploy::{reserve, run_reserved, Ctx, DeployStatus};
-use kuadrat_core::events::{EventKind, StoredEvent};
+use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
+use kuadrat_core::events::StoredEvent;
 use kuadrat_core::logs::tail;
 use kuadrat_core::spec::Route;
 use kuadrat_core::store::AppConfig;
 use kuadrat_core::workloads::query::status;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::error::RecvError;
 
+use crate::error::{ApiError, ApiResult};
 use crate::state::{spec_for, AppState};
+use crate::stream::events_sse;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -103,39 +101,6 @@ impl From<StoredEvent> for EventOut {
         }
     }
 }
-
-// -------------------------------------------------------------------- errors
-
-/// An error with the status the design assigns it. Constructed at the point the
-/// condition is detected, so the mapping lives with the check rather than in a
-/// catch-all `From` that has to guess.
-pub struct ApiError(StatusCode, String);
-
-impl ApiError {
-    fn new(code: StatusCode, msg: impl std::fmt::Display) -> Self {
-        Self(code, msg.to_string())
-    }
-    fn not_found(msg: impl std::fmt::Display) -> Self {
-        Self::new(StatusCode::NOT_FOUND, msg)
-    }
-    fn bad_request(msg: impl std::fmt::Display) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, msg)
-    }
-    fn conflict(msg: impl std::fmt::Display) -> Self {
-        Self::new(StatusCode::CONFLICT, msg)
-    }
-    fn internal(msg: impl std::fmt::Display) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, msg)
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
-    }
-}
-
-type ApiResult<T> = Result<T, ApiError>;
 
 // ------------------------------------------------------------------ handlers
 
@@ -285,158 +250,12 @@ async fn get_deploy(
     }))
 }
 
-/// One deploy's events: the stored backlog, then everything that happens
-/// after, closing when the deploy ends.
-///
-/// **The subscribe happens before any read, and the order relative to the
-/// backlog read is load-bearing.** An event landing between the backlog read
-/// and the subscribe would be lost permanently — there is no later chance to
-/// see it — and it is exactly the stage transition the viewer is waiting
-/// for. Subscribing first turns that loss into a duplicate instead: the
-/// event arrives once from the backlog and once (redundantly) over the
-/// channel, and the `id > last_sent` filter at the join drops the repeat. A
-/// duplicate is recoverable; a gap is not.
-///
-/// The deploy-row read is included ahead of the subscribe too, but only so
-/// nobody has to reason about which of the two reads counts — it carries no
-/// ordering requirement of its own. `already_terminal` exists to catch the
-/// one path that ends a deploy without an event at all (`reserve` rejecting
-/// a duplicate calls plain `finish_deploy`), and that is handled by the
-/// `already_terminal` check below, not by when the row happens to be read.
 async fn deploy_events(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    // Subscribing has no side effect and costs nothing, so it happens before
-    // every other step here — including the 404 check below.
-    let mut rx = st.hub.subscribe();
-
-    // 404 before a stream is opened. An unknown id must fail as a request —
-    // a stream that opens and then says nothing is indistinguishable, to a
-    // browser, from a deploy that is simply slow.
-    let row = st
-        .store
-        .deploy(id)
-        .map_err(|e| ApiError::internal(format!("reading deploy {id}: {e:#}")))?
-        .ok_or_else(|| ApiError::not_found(format!("no deploy {id}")))?;
-
-    let backlog = st
-        .store
-        .events_for(id)
-        .map_err(|e| ApiError::internal(format!("reading events for {id}: {e:#}")))?;
-
-    let already_terminal = row.status != DeployStatus::InProgress;
-
-    // The recovery path re-reads SQLite from inside the stream, which outlives
-    // the borrow of `st`.
-    let store = st.store.clone();
-
-    // Clamped to the highest id this deploy has actually stored. `resume` is
-    // untrusted client input seeded straight into `last_sent`; an id above
-    // anything the store has ever assigned this deploy is impossible for a
-    // real client to have seen (ids are only handed out on insert), so
-    // trusting it verbatim would filter out every backlog and live event,
-    // including the terminal one, and the stream would never yield anything
-    // or close. Clamping treats that case the same as no resume point at
-    // all past what is already known, rather than as a promise to skip
-    // events that have not happened yet.
-    let resume = resume_from(&headers).min(backlog.last().map_or(0, |ev| ev.id));
-
-    let stream = async_stream::stream! {
-        let mut last_sent = resume;
-        let mut ended = false;
-
-        for ev in backlog {
-            if ev.id <= resume {
-                continue;
-            }
-            last_sent = ev.id;
-            ended = is_finished(&ev);
-            yield Ok(sse_event(&ev));
-        }
-
-        // Nothing more can arrive for a deploy that has already ended. The
-        // second half of the condition covers a deploy finished by a path that
-        // emits no event — `reserve` rejecting a duplicate leaves a terminal
-        // row with an empty log — where waiting for a terminal event would
-        // mean waiting forever.
-        if ended || already_terminal {
-            return;
-        }
-
-        loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    if ev.event.deploy_id != id || ev.id <= last_sent {
-                        continue;
-                    }
-                    last_sent = ev.id;
-                    let ends_here = is_finished(&ev);
-                    yield Ok(sse_event(&ev));
-                    if ends_here {
-                        return;
-                    }
-                }
-                // The slow-receiver case, and the failure mode the design
-                // singles out as most likely to be got wrong. Treating it as
-                // fatal closes a viewer's stream mid-deploy; ignoring it
-                // silently skips stages. The dropped events are still in
-                // SQLite — they were persisted before they were published — so
-                // re-read from the last id sent and resume. This is the same
-                // path a reconnection takes.
-                //
-                // `events_for` re-reads every event for the deploy rather than
-                // querying `WHERE id > last_sent`: a deploy has on the order of
-                // thirteen events total, so the wasted rows are noise, and this
-                // is a deliberate choice at that scale, not an oversight — a
-                // deploy with orders of magnitude more events would want the
-                // narrower query.
-                Err(RecvError::Lagged(_)) => {
-                    let missed = match store.events_for(id) {
-                        Ok(evs) => evs,
-                        // The store is unreadable; ending the stream is the
-                        // honest answer, and the browser will reconnect.
-                        Err(_) => return,
-                    };
-                    for ev in missed {
-                        if ev.id <= last_sent {
-                            continue;
-                        }
-                        last_sent = ev.id;
-                        let ends_here = is_finished(&ev);
-                        yield Ok(sse_event(&ev));
-                        if ends_here {
-                            return;
-                        }
-                    }
-                }
-                // Every sender is gone: the daemon is shutting down.
-                Err(RecvError::Closed) => return,
-            }
-        }
-    };
-
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
-}
-
-fn is_finished(ev: &StoredEvent) -> bool {
-    matches!(ev.event.kind, EventKind::Finished { .. })
-}
-
-/// The id a reconnecting browser last saw. `EventSource` sets this header
-/// itself from the `id:` field of the last event it received, so honouring it
-/// is what makes a dropped connection resume rather than replay.
-///
-/// A value that is not a number is treated as absent. It is a hint, not a
-/// command: failing the request would break the reconnect it exists to serve,
-/// while replaying from the start is always correct and merely chattier.
-fn resume_from(headers: &HeaderMap) -> i64 {
-    headers
-        .get("last-event-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0)
+) -> ApiResult<Response> {
+    events_sse(&st, id, &headers, sse_event)
 }
 
 /// One event on the wire.
@@ -500,7 +319,7 @@ mod tests {
     use crate::hub::BroadcastSink;
     use axum::body::Body;
     use axum::http::Request;
-    use kuadrat_core::deploy::Stage;
+    use kuadrat_core::deploy::{DeployStatus, Stage};
     use kuadrat_core::events::{Event, EventSink, EventStatus};
     use kuadrat_core::exec::fake::FakeExecutor;
     use kuadrat_core::exec::CommandOutput;
