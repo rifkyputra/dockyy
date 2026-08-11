@@ -57,12 +57,12 @@ echo "podman : $(podman --version 2>/dev/null || echo MISSING)"
 mkdir -p "$WORK/$APP"
 cat > "$WORK/$APP/Containerfile" <<'EOF'
 FROM docker.io/library/alpine:3
-RUN mkdir -p /www && printf OK > /www/index.html
-CMD ["busybox", "httpd", "-f", "-p", "8000", "-h", "/www"]
+RUN apk add --no-cache busybox-extras && mkdir -p /www && printf OK > /www/index.html
+CMD ["httpd", "-f", "-p", "8000", "-h", "/www"]
 EOF
 cat > "$WORK/$APP/kuadrat.json" <<EOF
 {"name":"$APP","image":"","command":null,"env":[],"ports":["${APP_PORT}:8000"],"volumes":[],
- "secrets":[],"memory_max":"128M","health_cmd":null,"restart_policy":"Always","route":null}
+ "secrets":[],"memory_max":"128M","health_cmd":"wget -qO- http://127.0.0.1:8000/ | grep -q OK","restart_policy":"Always","route":null}
 EOF
 git -C "$WORK/$APP" init -q
 git -C "$WORK/$APP" -c user.email=t@t -c user.name=t add -A
