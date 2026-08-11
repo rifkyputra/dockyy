@@ -293,6 +293,30 @@ impl Store {
         Ok(out)
     }
 
+    /// An app's deploy history, newest first, bounded by `limit`.
+    ///
+    /// Ordered by id rather than by `created_at`: ids are monotonic from
+    /// SQLite's `AUTOINCREMENT`, while two deploys created inside the same
+    /// second share a timestamp and would order arbitrarily.
+    pub fn recent_deploys(&self, app: &str, limit: usize) -> Result<Vec<DeployRow>> {
+        let conn = self.conn.lock().expect("store lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, app, stage, status, detail FROM deploys
+                 WHERE app = ?1 ORDER BY id DESC LIMIT ?2",
+            )
+            .context("preparing recent deploys query")?;
+        let rows = stmt
+            .query_map(params![app, limit as i64], deploy_row)
+            .context("querying recent deploys")?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading deploy row")??);
+        }
+        Ok(out)
+    }
+
     /// Try to take the per-app lock. `true` if acquired, `false` if already
     /// held. The lock row is durable — a crash leaves it held, and G5's
     /// reconciliation releases it.
@@ -1427,5 +1451,49 @@ mod tests {
                 status: EventStatus::Failed
             }
         );
+    }
+
+    #[test]
+    fn recent_deploys_returns_an_apps_history_newest_first() {
+        let (_dir, store) = open_temp();
+        let first = store.create_deploy("web").expect("first");
+        let second = store.create_deploy("web").expect("second");
+
+        let rows = store.recent_deploys("web", 10).expect("read");
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![second, first]
+        );
+    }
+
+    #[test]
+    fn recent_deploys_is_scoped_to_one_app() {
+        let (_dir, store) = open_temp();
+        store.create_deploy("web").expect("web");
+        let api = store.create_deploy("api").expect("api");
+
+        let rows = store.recent_deploys("api", 10).expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, api);
+    }
+
+    #[test]
+    fn recent_deploys_honours_its_limit() {
+        let (_dir, store) = open_temp();
+        for _ in 0..5 {
+            store.create_deploy("web").expect("create");
+        }
+        assert_eq!(store.recent_deploys("web", 2).expect("read").len(), 2);
+    }
+
+    /// An app that has never deployed is an empty history, not an error — the
+    /// page renders "no deploys yet" and must not 500.
+    #[test]
+    fn an_app_with_no_deploys_has_an_empty_history() {
+        let (_dir, store) = open_temp();
+        assert!(store
+            .recent_deploys("nothing", 10)
+            .expect("read")
+            .is_empty());
     }
 }
