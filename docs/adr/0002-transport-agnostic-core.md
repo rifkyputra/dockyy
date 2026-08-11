@@ -83,8 +83,8 @@ The invariant, stated so violations are obvious in review:
      `core`, so it goes through a trait rather than a channel type baked into a module — which is what
      keeps `tokio::sync::broadcast` a *daemon* dependency rather than a `core` one. `emit` is
      synchronous and returns nothing: a subscriber that has gone away must not be able to fail a
-     deploy, and a sink with no way to await cannot block the deploy loop on I/O. A sink that needs
-     async work hands off to a channel and does that work in its own task.
+     deploy, and a sink cannot await, so it cannot suspend the deploy loop; it must also not block —
+     a sink that needs I/O hands off to a channel and does that work in its own task.
 
   Outside `kuadrat-core` the rule does not apply: the CLI reading a spec file off the
   operator's own disk is not a host interaction.

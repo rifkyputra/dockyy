@@ -285,7 +285,7 @@ untested guard is an assumed one.
 
 | Group | Content |
 |---|---|
-| **H1** | `EventSink` seam, the three impls, `StoredEvent`, sink calls in `run`/`reconcile`, ADR-0002 fourth clause |
+| **H1** | `EventSink` seam, the three impls, `StoredEvent`, sink calls in `run` (`reconcile` deferred — see known-gaps), ADR-0002 fourth clause |
 | **H2** | Store migration: `repo_path`/`route` columns, `register_app`/`app_row`, the idempotency tests |
 | **H3** | `logs` module — `tail` and `search` |
 | **H4** | `crates/daemon`: config, loopback guard, router, JSON API, the global semaphore and the before-queue 409, reconcile-then-bind |

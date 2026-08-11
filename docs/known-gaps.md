@@ -11,6 +11,22 @@ emitted events — and H1 deliberately did not add them, because a watcher can o
 daemon is running and reconcile runs before it binds. Revisit in H4 if the UI should show "this was
 rolled back by a crash recovery" rather than only the terminal status.
 
+## From H1 — no terminal event
+
+`finish_deploy` writes the deploy's terminal status (`Done`/`RolledBack`/`Failed`) to the `deploys`
+table, but nothing emits an event for it — the last event a subscriber sees is the stage-level
+Succeeded/Failed from Route or Healthcheck. So from the event stream alone, a `Done` deploy is
+indistinguishable from one that stalled right after that last stage event, and a rollback's success
+is invisible: a watcher sees "Apply failed" and nothing after it, with no signal that the rollback
+then succeeded.
+
+No data is lost — the terminal status is durable in the `deploys` table, so no event is dropped, it
+is just that the table and the event stream disagree about where the story ends. But the design
+says "the stream closes when the deploy reaches a terminal status," which means the next group's SSE
+handler cannot decide that from the event stream by itself. It has to poll the `deploys` row when the
+last event is a stage terminal (Succeeded on Route/Healthcheck, or Failed on any stage), or H1's gap
+becomes H4/H5's decision: add a deploy-level event type instead.
+
 ## From G5 — a per-row store error aborts the whole reconcile batch
 
 `deploy::reconcile` `?`-propagates store errors (`load_previous`/`finish_deploy`/`release_lock`) per
