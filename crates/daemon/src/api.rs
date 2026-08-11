@@ -1,10 +1,10 @@
 //! The JSON API. Every handler is a thin shell over `core`; nothing here
 //! decides anything the CLI would decide differently.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse;
-use axum::response::Response;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
@@ -16,6 +16,7 @@ use kuadrat_core::workloads::query::status;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiResult};
+use crate::pages::wants_html;
 use crate::state::{spec_for, AppState};
 use crate::stream::events_sse;
 
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app/:name", get(crate::pages::app_detail))
         .route("/deploy/:id", get(crate::pages::deploy_detail))
         .route("/deploy/:id/stream", get(crate::pages::deploy_stream))
+        .route("/apps", post(register_form))
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
@@ -156,10 +158,16 @@ async fn register(
 /// Returns as soon as the deploy is *accepted*. Whether it succeeded arrives
 /// over the event stream: this mirrors `deploy::run`'s own contract, where
 /// "could not begin" is `Err` and "ran and rolled back" is `Ok(RolledBack)`.
+///
+/// Every check above (the 404, the 409, the 400) is unchanged; only the way
+/// out branches on `wants_html`. A browser's redeploy button gets sent to the
+/// page that shows the deploy it just started; everyone else — the CLI, curl,
+/// a test that forgot the header — keeps getting the JSON body it always got.
 async fn deploy(
     State(st): State<AppState>,
     Path(name): Path<String>,
-) -> ApiResult<(StatusCode, Json<DeployAccepted>)> {
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     let config = registration(&st, &name)?;
 
     // "This app is already deploying" outranks anything wrong with the spec:
@@ -211,7 +219,33 @@ async fn deploy(
         let _ = run_reserved(&ctx, spec, &repo, deploy_id).await;
     });
 
-    Ok((StatusCode::OK, Json(DeployAccepted { deploy_id })))
+    if wants_html(&headers) {
+        Ok(Redirect::to(&format!("/deploy/{deploy_id}")).into_response())
+    } else {
+        Ok((StatusCode::OK, Json(DeployAccepted { deploy_id })).into_response())
+    }
+}
+
+/// `POST /apps`: the operator's registration form, distinct from the JSON
+/// `POST /api/apps` so neither handler has to branch on content type for both
+/// its input and its output. Both call `Store::register_app` — one validation
+/// implementation, two presentations.
+async fn register_form(State(st): State<AppState>, Form(req): Form<RegisterRequest>) -> Response {
+    let config = AppConfig {
+        name: req.name,
+        repo_path: req.repo_path,
+        route: req.route,
+    };
+    match st.store.register_app(&config) {
+        Ok(()) => Redirect::to(&format!("/app/{}", config.name)).into_response(),
+        // A bare 400 tells the operator nothing; re-render the form they were
+        // looking at with the reason on the page.
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            crate::pages::registration_page(Some(&format!("{e:#}"))),
+        )
+            .into_response(),
+    }
 }
 
 /// A bounded journald read for a registered app. Live tailing is deliberately
@@ -372,6 +406,30 @@ pub(crate) mod tests {
         (app, store, dir)
     }
 
+    /// The deploy route needs a spec it can actually read: `spec_for` goes
+    /// through `std::fs`, so a fake filesystem does not reach it. The repo
+    /// lives in the same `TempDir` the store does, so it dies with the test.
+    fn harness_with_spec() -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        let (app, store, hub, dir) = harness_parts();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let mut spec = kuadrat_core::spec::WorkloadSpec::new("web", "placeholder");
+        spec.ports = vec!["3000:3000".into()];
+        std::fs::write(
+            repo.join("kuadrat.json"),
+            serde_json::to_string(&spec).expect("spec json"),
+        )
+        .expect("write spec");
+        store
+            .register_app(&AppConfig {
+                name: "web".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                route: None,
+            })
+            .expect("register");
+        (app, store, hub, dir)
+    }
+
     /// A harness whose `journalctl` returns one line of output, for testing
     /// the app detail page's log section.
     pub(crate) fn harness_with_log_line(
@@ -434,6 +492,28 @@ pub(crate) mod tests {
             .method("POST")
             .uri(path)
             .body(Body::empty())
+            .expect("request")
+    }
+
+    /// A browser's request: no body, but an `Accept` header a browser actually
+    /// sends. `wants_html` keys on this.
+    fn post_html(path: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("accept", "text/html")
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    /// A form submission, the shape a plain HTML `<form>` sends — distinct
+    /// from `post_json`, which is what the JSON API expects instead.
+    pub(crate) fn post_form(path: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(body.to_string()))
             .expect("request")
     }
 
@@ -563,6 +643,43 @@ pub(crate) mod tests {
             .await
             .expect("send");
         assert_eq!(res.status(), StatusCode::CONFLICT);
+    }
+
+    /// A browser posting the redeploy form must land on the page that shows the
+    /// deploy it just started.
+    #[tokio::test]
+    async fn a_browser_deploy_redirects_to_the_deploy_page() {
+        let (app, _store, _hub, _d) = harness_with_spec();
+
+        let res = app
+            .oneshot(post_html("/api/apps/web/deploy"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let location = res
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.starts_with("/deploy/"),
+            "location was {location:?}"
+        );
+    }
+
+    /// The CLI is a JSON client and must be unaffected. Note this request sends
+    /// no `Accept` header at all — the default has to be JSON, or every
+    /// existing API caller silently becomes a redirect follower.
+    #[tokio::test]
+    async fn a_request_without_an_accept_header_still_gets_json() {
+        let (app, _store, _hub, _d) = harness_with_spec();
+
+        let res = app
+            .oneshot(post("/api/apps/web/deploy"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_json(res).await.get("deploy_id").is_some());
     }
 
     #[tokio::test]

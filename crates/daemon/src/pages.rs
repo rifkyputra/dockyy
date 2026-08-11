@@ -21,6 +21,19 @@ use crate::error::ApiResult;
 use crate::state::AppState;
 use crate::stream::events_sse;
 
+/// Whether this caller is a browser.
+///
+/// The redirect is the exception, not the default: browsers reliably send
+/// `text/html` in `Accept`, while an API client that forgets the header would
+/// be turned into a redirect follower by the opposite test. Defaulting to JSON
+/// keeps every existing caller — the CLI, curl, the tests — working unchanged.
+pub(crate) fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"))
+}
+
 /// Deploys shown on an app's page. Fixed by the design document rather than
 /// left to taste, so the page and anyone reading the spec agree.
 const RECENT_DEPLOYS: usize = 10;
@@ -92,9 +105,41 @@ pub async fn index(State(st): State<AppState>) -> Markup {
                 }
             }
         }
+
+        (registration_form(None))
     };
 
     layout("apps", body)
+}
+
+/// The registration form itself, plain fields and a submit button — shared by
+/// the app list, where it renders clean, and by a rejected submission, which
+/// re-renders it with `error` filled in so the operator sees why on the page
+/// they were already looking at, not as a bare status code.
+fn registration_form(error: Option<&str>) -> Markup {
+    html! {
+        h2 { "Register an app" }
+        @if let Some(reason) = error {
+            p id="register-error" { (reason) }
+        }
+        form method="post" action="/apps" {
+            div {
+                label for="register-name" { "Name" }
+                input id="register-name" type="text" name="name" required;
+            }
+            div {
+                label for="register-repo-path" { "Repo path" }
+                input id="register-repo-path" type="text" name="repo_path" required;
+            }
+            button type="submit" { "Register" }
+        }
+    }
+}
+
+/// `POST /apps`'s error page: the registration form, re-rendered with the
+/// rejection reason, wrapped in the shared layout.
+pub(crate) fn registration_page(error: Option<&str>) -> Markup {
+    layout("register", registration_form(error))
 }
 
 /// An app's detail page at `GET /app/:name`: status, route, image, its
@@ -171,6 +216,10 @@ pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) ->
                     "—"
                 }
             }
+        }
+
+        form id="redeploy" method="post" action={ "/api/apps/" (config.name) "/deploy" } {
+            button type="submit" { "Redeploy" }
         }
 
         h2 { "Recent deploys" }
@@ -316,7 +365,7 @@ fn store_unavailable(what: &str, e: anyhow::Error) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::tests::{body_text, get, harness_parts, sse_raw_data, stage_event};
+    use crate::api::tests::{body_text, get, harness_parts, post_form, sse_raw_data, stage_event};
     use axum::http::StatusCode;
     use kuadrat_core::deploy::{DeployStatus, Stage};
     use kuadrat_core::events::{Event, EventSink, EventStatus};
@@ -427,5 +476,38 @@ mod tests {
         let (app, _store, _hub, _d) = harness_parts();
         let res = app.oneshot(get("/deploy/999")).await.expect("send");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_registration_form_registers_and_redirects() {
+        let (app, store, _hub, _d) = harness_parts();
+        let res = app
+            .oneshot(post_form("/apps", "name=web&repo_path=/srv/web"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers().get("location").and_then(|v| v.to_str().ok()),
+            Some("/app/web")
+        );
+        assert!(store.app_config("web").expect("read").is_some());
+    }
+
+    /// A rejected registration must explain itself on the page the operator is
+    /// looking at, not as a bare status code.
+    #[tokio::test]
+    async fn a_rejected_registration_re_renders_the_form_with_the_reason() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let res = app
+            .oneshot(post_form("/apps", "name=web&repo_path=relative/path"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = body_text(res).await;
+        assert!(body.contains("<form"), "the form must come back: {body}");
+        assert!(
+            body.to_lowercase().contains("absolute"),
+            "the reason must be on the page: {body}"
+        );
     }
 }
