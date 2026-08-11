@@ -112,30 +112,50 @@ dependency and no `host` parameter.
   `Vec<StoredEvent>`. **Both columns already exist** (`events.id INTEGER PRIMARY KEY AUTOINCREMENT`,
   `events.at TEXT NOT NULL DEFAULT (datetime('now'))`) — this is an API exposure change, not a
   schema change.
-- `store`: `apps` gains `repo_path TEXT` and `route TEXT`, both nullable, with
-  `register_app`/`app_row` accessors. See Migration below.
+- `store`: a new `app_config` table — `name`, `repo_path`, `route_domain`, `route_port` — with
+  `register_app`, `app_config` and `list_app_configs` accessors. **Not** new columns on `apps`: see
+  Registration storage below.
 - `logs`: a new module, `tail(exec, unit, n)` and `search(exec, unit, pattern)` over the existing
   `Executor`.
 - `deploy::run` and `reconcile`: emit through the sink after each persisted event.
 
 Nothing else in `core` moves.
 
-### Migration
+### Registration storage
 
-`Store::open` runs `execute_batch(SCHEMA)` where every statement is `CREATE TABLE IF NOT EXISTS`. On
-a host that already has a database — the acceptance host does — editing the `apps` block has **no
-effect at all**, because the table exists and the statement is skipped. New columns therefore need
-an explicit, idempotent step after the schema batch:
+Registration does **not** extend the `apps` table, and there is no `ALTER TABLE`.
+
+`apps` is `name TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, spec_json TEXT NOT NULL`. A
+registration exists *before* an app's first deploy — that is its purpose, since a browser has no
+argv to supply a repo path from — so at registration time there is no spec and no slug, and the row
+cannot be inserted at all. Nullable new columns do not help: the blocker is a `NOT NULL` on an
+existing column, and SQLite cannot drop one without rebuilding the table that holds user data.
+
+A separate table sidesteps it entirely:
 
 ```sql
-ALTER TABLE apps ADD COLUMN repo_path TEXT;   -- ignore "duplicate column name"
-ALTER TABLE apps ADD COLUMN route TEXT;
+CREATE TABLE IF NOT EXISTS app_config (
+    name         TEXT PRIMARY KEY,
+    repo_path    TEXT NOT NULL,
+    route_domain TEXT,
+    route_port   INTEGER,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
 
-SQLite has no `ADD COLUMN IF NOT EXISTS`, so the step either inspects `PRAGMA table_info(apps)`
-first or tolerates the duplicate-column error specifically — not all errors. A test must open a
-store twice and assert the second open succeeds, and another must open a database created by the
-pre-phase-3 schema and assert the columns arrive.
+Added to the existing `SCHEMA` batch, this is correct on an existing database by construction —
+`IF NOT EXISTS` creates it where it is missing and does nothing where it is not. No migration step,
+no idempotency question.
+
+The split is also honest about meaning: `apps` records **what was deployed**, written by the deploy
+loop on success; `app_config` records **what the operator asked for**, written by registration. They
+have different lifetimes and different writers.
+
+The route is two nullable columns rather than one blob so a query can filter on domain without
+parsing. They are written together and read together — one without the other means the row was
+edited outside kuadrat, and the read refuses it rather than serving half a route. The upsert writes
+both columns unconditionally, including when the route is `None`: an upsert that skipped nulls would
+make clearing a route impossible, leaving an app served on a domain the operator had just removed.
 
 ## Surfaces
 
@@ -289,7 +309,7 @@ untested guard is an assumed one.
 | Group | Content |
 |---|---|
 | **H1** | `EventSink` seam, the three impls, `StoredEvent`, sink calls in `run` (`reconcile` deferred — see known-gaps), ADR-0002 fourth clause |
-| **H2** | Store migration: `repo_path`/`route` columns, `register_app`/`app_row`, the idempotency tests |
+| **H2** | `app_config` table, `register_app`/`app_config`/`list_app_configs`, the idempotency tests |
 | **H3** | `logs` module — `tail` and `search` |
 | **H4** | `crates/daemon`: config, loopback guard, router, JSON API, the global semaphore and the before-queue 409, reconcile-then-bind |
 | **H5** | SSE: broadcast hub, backlog-then-live, dedupe, lag recovery, `Last-Event-ID` |
