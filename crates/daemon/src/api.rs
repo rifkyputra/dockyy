@@ -4,7 +4,7 @@
 use std::convert::Infallible;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -306,6 +306,7 @@ async fn get_deploy(
 async fn deploy_events(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     // Subscribing has no side effect and costs nothing, so it happens before
     // every other step here — including the 404 check below.
@@ -331,11 +332,16 @@ async fn deploy_events(
     // the borrow of `st`.
     let store = st.store.clone();
 
+    let resume = resume_from(&headers);
+
     let stream = async_stream::stream! {
-        let mut last_sent = 0i64;
+        let mut last_sent = resume;
         let mut ended = false;
 
         for ev in backlog {
+            if ev.id <= resume {
+                continue;
+            }
             last_sent = ev.id;
             ended = is_finished(&ev);
             yield Ok(sse_event(&ev));
@@ -400,6 +406,21 @@ async fn deploy_events(
 
 fn is_finished(ev: &StoredEvent) -> bool {
     matches!(ev.event.kind, EventKind::Finished { .. })
+}
+
+/// The id a reconnecting browser last saw. `EventSource` sets this header
+/// itself from the `id:` field of the last event it received, so honouring it
+/// is what makes a dropped connection resume rather than replay.
+///
+/// A value that is not a number is treated as absent. It is a hint, not a
+/// command: failing the request would break the reconnect it exists to serve,
+/// while replaying from the start is always correct and merely chattier.
+fn resume_from(headers: &HeaderMap) -> i64 {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
 }
 
 /// One event on the wire.
@@ -529,6 +550,14 @@ mod tests {
         Request::builder()
             .method("POST")
             .uri(path)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    fn get_resuming(path: &str, last: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("last-event-id", last)
             .body(Body::empty())
             .expect("request")
     }
@@ -952,5 +981,61 @@ mod tests {
             "ids must ascend: {ids:?}"
         );
         assert_eq!(data[6]["stage"], "deploy");
+    }
+
+    #[tokio::test]
+    async fn a_reconnecting_client_gets_only_what_it_has_not_seen() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        let first = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        stage_event(&store, id, Stage::Build, EventStatus::Started);
+        store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let res = app
+            .oneshot(get_resuming(
+                &format!("/api/deploys/{id}/events"),
+                &first.id.to_string(),
+            ))
+            .await
+            .expect("send");
+
+        let data = sse_data(res).await;
+        assert_eq!(data.len(), 2, "the already-seen event must not repeat");
+        assert_eq!(data[0]["stage"], "build");
+    }
+
+    /// A header that is not a number is a hint, not a command. Failing the
+    /// request over it would break a reconnect for no gain; replaying from the
+    /// start is always correct, only chattier.
+    #[tokio::test]
+    async fn a_malformed_last_event_id_is_treated_as_absent() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        stage_event(&store, id, Stage::Detect, EventStatus::Started);
+        store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let res = app
+            .oneshot(get_resuming(&format!("/api/deploys/{id}/events"), "banana"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(sse_data(res).await.len(), 2);
     }
 }
