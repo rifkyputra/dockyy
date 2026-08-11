@@ -156,3 +156,14 @@ same family and should be closed when secrets handling lands.
   nothing. `app_name` now also rejects a directory whose name slugs to empty, which would have
   produced the image tag `localhost/kuadrat-:<sha>`. The remaining arms are still pure dispatch and
   are covered by the acceptance scripts.
+
+## From H3 — journald content is not sanitised
+
+`logs::tail` and `logs::search` (when it arrives) return whatever the application wrote to its
+stdout and stderr. A workload that logs a token or a password will have that value returned by
+this module and, from H4 onward, rendered in the web UI and served over the API. kuadrat's own
+code never writes a secret to a log — the secrets stage reports names only — but it cannot vouch
+for what a deployed application logs.
+
+This is why the daemon binds loopback and ships no authentication: log content is as sensitive as
+the least careful app on the host.
