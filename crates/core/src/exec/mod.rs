@@ -3,6 +3,7 @@ pub mod local;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio_stream::Stream;
 
 /// Result of running one host command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,29 @@ pub trait Executor: Send + Sync {
     ) -> Result<CommandOutput> {
         let _ = (program, args, stdin);
         anyhow::bail!("run_with_stdin is not supported by this executor")
+    }
+
+    /// Run a command and yield its stdout a line at a time, for as long as it
+    /// runs.
+    ///
+    /// Returns a stream rather than taking a channel because a channel-based
+    /// signature does not return until the stream ends, so a caller cannot
+    /// both drive it and read it in one task — it would have to spawn, and
+    /// `spawn` needs `'static` while `core` holds `&dyn Executor` everywhere.
+    /// A seam that dictates its caller's task structure has stopped being an
+    /// abstraction. The `Result` per item puts a mid-stream failure inline,
+    /// where it happened, instead of on a separate path from the lines it
+    /// interrupted.
+    ///
+    /// Default impl bails, like `run_with_stdin`, so a new executor compiles
+    /// until it opts in.
+    async fn run_streaming(
+        &self,
+        program: &str,
+        args: &[String],
+    ) -> Result<Box<dyn Stream<Item = Result<String>> + Send + Unpin>> {
+        let _ = (program, args);
+        anyhow::bail!("streaming is not supported by this executor")
     }
 }
 
@@ -296,5 +320,95 @@ mod tests {
             .expect("cat runs");
         assert!(out.success());
         assert_eq!(out.stdout, "piped-input");
+    }
+
+    /// A new executor — the fleet driver's SSH one, later — must compile
+    /// before it supports streaming. The default impl is what allows that,
+    /// and it must fail loudly rather than silently yielding nothing.
+    #[tokio::test]
+    async fn an_executor_that_has_not_opted_in_bails_on_run_streaming() {
+        struct Minimal;
+        #[async_trait::async_trait]
+        impl Executor for Minimal {
+            async fn run(&self, _p: &str, _a: &[String]) -> anyhow::Result<CommandOutput> {
+                unreachable!()
+            }
+        }
+        // `Result::unwrap_err` requires the `Ok` type to be `Debug`, which a
+        // boxed `dyn Stream` trait object cannot be (a second, non-auto trait
+        // bound isn't allowed on a trait object). Match instead.
+        let err = match Minimal.run_streaming("journalctl", &[]).await {
+            Ok(_) => panic!("expected the default impl to bail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("streaming"), "was: {err}");
+    }
+
+    #[tokio::test]
+    async fn the_local_executor_yields_stdout_a_line_at_a_time() {
+        use tokio_stream::StreamExt;
+        let exec = LocalExecutor;
+        let mut stream = exec
+            .run_streaming("sh", &["-c".into(), "printf 'one\\ntwo\\nthree\\n'".into()])
+            .await
+            .expect("stream");
+
+        let mut got = Vec::new();
+        while let Some(line) = stream.next().await {
+            got.push(line.expect("line"));
+        }
+        assert_eq!(got, vec!["one", "two", "three"]);
+    }
+
+    /// Dropping the stream must kill the child. Without that, "the client went
+    /// away" is an intention rather than a bound, and every abandoned viewer
+    /// leaves a `journalctl -f` running.
+    #[tokio::test]
+    async fn dropping_the_stream_kills_the_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("pid");
+        let script = format!("echo $$ > {}; sleep 30", pidfile.display());
+
+        let exec = LocalExecutor;
+        let stream = exec
+            .run_streaming("sh", &["-c".into(), script])
+            .await
+            .expect("stream");
+
+        // Wait for the child to record its pid rather than sleeping a fixed
+        // amount: a sleep is slow when it passes and flaky when it does not.
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pidfile) {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    break pid;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+
+        drop(stream);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} outlived its stream"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fake_executor_yields_its_scripted_lines() {
+        use tokio_stream::StreamExt;
+        let exec = FakeExecutor::new();
+        exec.expect_stream("journalctl", vec!["a".into(), "b".into()]);
+
+        let mut stream = exec.run_streaming("journalctl", &[]).await.expect("stream");
+        let mut got = Vec::new();
+        while let Some(line) = stream.next().await {
+            got.push(line.expect("line"));
+        }
+        assert_eq!(got, vec!["a", "b"]);
     }
 }

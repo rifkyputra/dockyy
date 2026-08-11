@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use tokio_stream::Stream;
 
 use super::{CommandOutput, Executor};
 
@@ -24,6 +25,7 @@ pub struct FakeExecutor {
     by_program: Mutex<HashMap<String, CommandOutput>>,
     calls: Mutex<Vec<(String, Vec<String>)>>,
     stdins: Mutex<Vec<String>>,
+    streams: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl FakeExecutor {
@@ -90,6 +92,15 @@ impl FakeExecutor {
     pub fn stdins(&self) -> Vec<String> {
         self.stdins.lock().expect("stdins lock").clone()
     }
+
+    /// Script the lines yielded by [`run_streaming`](Executor::run_streaming)
+    /// for every invocation of `program`.
+    pub fn expect_stream(&self, program: &str, lines: Vec<String>) {
+        self.streams
+            .lock()
+            .expect("streams lock")
+            .insert(program.to_string(), lines);
+    }
 }
 
 #[async_trait]
@@ -111,5 +122,21 @@ impl Executor for FakeExecutor {
             .expect("stdins lock")
             .push(stdin.to_string());
         self.scripted(program, args)
+    }
+
+    async fn run_streaming(
+        &self,
+        program: &str,
+        args: &[String],
+    ) -> Result<Box<dyn Stream<Item = Result<String>> + Send + Unpin>> {
+        self.record_call(program, args);
+        let lines = self
+            .streams
+            .lock()
+            .expect("streams lock")
+            .get(program)
+            .cloned()
+            .ok_or_else(|| anyhow!("unexpected stream: {program} {}", args.join(" ")))?;
+        Ok(Box::new(tokio_stream::iter(lines.into_iter().map(Ok))))
     }
 }
