@@ -338,7 +338,7 @@ untested guard is an assumed one.
 | **H2** | `app_config` table, `register_app`/`app_config`/`list_app_configs`, the idempotency tests |
 | **H3** | `logs` module — `tail` and `search` |
 | **H4** | `crates/daemon`: config, loopback guard, router, JSON API, the global semaphore and the before-queue 409, reconcile-then-bind |
-| **H5** | SSE: broadcast hub, backlog-then-live, dedupe, lag recovery, `Last-Event-ID` |
+| **H5** | SSE: the deploy-level terminal event, broadcast hub, backlog-then-live, dedupe, lag recovery, `Last-Event-ID` |
 | **H6** | The three htmx pages and embedded assets |
 | **H7** | Webhook sender; `kuadrat serve` wiring, the systemd unit, `kuadrat deploy` as an API client, `serve-acceptance.sh` |
 

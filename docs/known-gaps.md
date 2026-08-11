@@ -5,27 +5,30 @@ deferrable at the time, and worth re-reading before the phase it names.
 
 ## From H1 — `reconcile` emits no events
 
-`deploy::reconcile` rolls back crashed deploys and calls `finish_deploy`, but appends no events, so
-a reconciled rollback is invisible to a subscriber. That is unchanged from phase 2 — reconcile never
-emitted events — and H1 deliberately did not add them, because a watcher can only exist while the
-daemon is running and reconcile runs before it binds. Revisit in H4 if the UI should show "this was
-rolled back by a crash recovery" rather than only the terminal status.
+**Narrowed 2026-08-11 in H5.** `reconcile` now appends the deploy-level terminal event for each row
+it rolls back or fails, so a crash-recovered deploy has an explicit ending in its timeline and its
+stream closes instead of hanging. Nobody is subscribed while reconcile runs — it completes before
+the listener binds — so the value is entirely in the stored record that `/deploy/:id` renders
+afterwards.
+
+Still open: reconcile emits no *stage* events, so the UI shows the ending without showing that a
+crash recovery produced it. The terminal event's `detail` carries the cause, which is the part that
+matters; a dedicated "recovered by reconcile" signal can wait for a group that has a UI to show it.
 
 ## From H1 — no terminal event
 
-`finish_deploy` writes the deploy's terminal status (`Done`/`RolledBack`/`Failed`) to the `deploys`
-table, but nothing emits an event for it — the last event a subscriber sees is the stage-level
-Succeeded/Failed from Route or Healthcheck. So from the event stream alone, a `Done` deploy is
-indistinguishable from one that stalled right after that last stage event, and a rollback's success
-is invisible: a watcher sees "Apply failed" and nothing after it, with no signal that the rollback
-then succeeded.
+**Closed 2026-08-11 in H5.** `EventKind::Finished { status: DeployStatus }` is a stored event, so
+the `deploys` table and the event log now agree about where a deploy's story ends, and a rollback
+that succeeded is visible rather than inferred from silence. It is stored as the literal `"deploy"`
+in the `events.stage` column with the `DeployStatus` in `status` — no schema change, and rows
+written before H5 read back unaltered. The SSE handler closes on that event.
 
-No data is lost — the terminal status is durable in the `deploys` table, so no event is dropped, it
-is just that the table and the event stream disagree about where the story ends. But the design
-says "the stream closes when the deploy reaches a terminal status," which means the next group's SSE
-handler cannot decide that from the event stream by itself. It has to poll the `deploys` row when the
-last event is a stage terminal (Succeeded on Route/Healthcheck, or Failed on any stage), or H1's gap
-becomes H4/H5's decision: add a deploy-level event type instead.
+Of the two options recorded here, the second was taken. Polling the `deploys` row would have closed
+the stream but left the successful-rollback case invisible, which was half the complaint.
+
+One path still finishes a deploy without an event: `reserve` rejecting a duplicate writes `Failed`
+and returns `Err`, so the caller gets a 409 and is never handed the id. The stream covers that row
+by checking its status before deciding to wait.
 
 ## From G5 — a per-row store error aborts the whole reconcile batch
 
