@@ -17,12 +17,17 @@ fn escape_percent(s: &str) -> String {
     s.replace('%', "%%")
 }
 
-/// Quote one `Exec=` argument per systemd's exec syntax.
+/// Quote one systemd word — an `Exec=` argument or a whole `Environment=`
+/// assignment.
 ///
-/// systemd splits `Exec=` on whitespace, so an argument containing a space becomes two
-/// arguments unless it is quoted. Inside double quotes systemd honours C-style escapes,
-/// so `\` and `"` must be escaped.
-fn quote_exec_arg(arg: &str) -> String {
+/// systemd splits both directives on whitespace: `Exec=` into argv, and
+/// `Environment=` into separate `KEY=VALUE` assignments. Either way a word
+/// containing a space becomes two words unless it is quoted. Inside double
+/// quotes systemd honours C-style escapes, so `\` and `"` must be escaped.
+///
+/// For `Environment=` the **entire** assignment is quoted, not just the value:
+/// `Environment="GREETING=hello world"` is the form systemd documents.
+fn quote_word(arg: &str) -> String {
     let needs_quoting = arg.is_empty()
         || arg
             .chars()
@@ -60,11 +65,10 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
         out.push_str(&format!("Volume={}\n", escape_percent(volume)));
     }
     for (key, value) in &spec.env {
-        out.push_str(&format!(
-            "Environment={}={}\n",
-            escape_percent(key),
-            escape_percent(value)
-        ));
+        // Percent-escape first, then quote: quoting only escapes `\` and `"`,
+        // so it cannot disturb an already-doubled `%%`.
+        let assignment = format!("{}={}", escape_percent(key), escape_percent(value));
+        out.push_str(&format!("Environment={}\n", quote_word(&assignment)));
     }
     for secret in &spec.secrets {
         out.push_str(&format!("Secret={secret}\n"));
@@ -75,7 +79,7 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
     if let Some(command) = &spec.command {
         let argv: Vec<String> = command
             .iter()
-            .map(|a| quote_exec_arg(&escape_percent(a)))
+            .map(|a| quote_word(&escape_percent(a)))
             .collect();
         out.push_str(&format!("Exec={}\n", argv.join(" ")));
     }
@@ -145,13 +149,13 @@ mod tests {
 
     #[test]
     fn exec_quotes_only_the_arguments_that_need_it() {
-        assert_eq!(quote_exec_arg("node"), "node");
-        assert_eq!(quote_exec_arg("--port"), "--port");
-        assert_eq!(quote_exec_arg("echo hello world"), "\"echo hello world\"");
-        assert_eq!(quote_exec_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(quote_exec_arg("a\\b"), "\"a\\\\b\"");
-        assert_eq!(quote_exec_arg("it's"), "\"it's\"");
-        assert_eq!(quote_exec_arg(""), "\"\"");
+        assert_eq!(quote_word("node"), "node");
+        assert_eq!(quote_word("--port"), "--port");
+        assert_eq!(quote_word("echo hello world"), "\"echo hello world\"");
+        assert_eq!(quote_word("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(quote_word("a\\b"), "\"a\\\\b\"");
+        assert_eq!(quote_word("it's"), "\"it's\"");
+        assert_eq!(quote_word(""), "\"\"");
     }
 
     #[test]
@@ -181,6 +185,56 @@ mod tests {
         spec.env = vec![("PW".into(), "a%b".into())];
         let unit = render(&spec).expect("render");
         assert!(unit.contains("Environment=PW=a%%b"), "unit was:\n{unit}");
+    }
+
+    /// The bug this pins: `Environment=` splits on whitespace exactly like
+    /// `Exec=` does, so an unquoted two-word value silently truncated at the
+    /// first space. Found by deploying examples/hello-py, whose GREETING was
+    /// "hello from kuadrat" and arrived in the container as "hello".
+    #[test]
+    fn an_env_value_with_spaces_is_quoted() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.env = vec![("GREETING".into(), "hello from kuadrat".into())];
+        let unit = render(&spec).expect("render");
+        assert!(
+            unit.contains("Environment=\"GREETING=hello from kuadrat\""),
+            "unit was:\n{unit}"
+        );
+    }
+
+    #[test]
+    fn an_env_value_without_spaces_is_left_bare() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.env = vec![("NODE_ENV".into(), "production".into())];
+        let unit = render(&spec).expect("render");
+        assert!(
+            unit.contains("Environment=NODE_ENV=production\n"),
+            "unit was:\n{unit}"
+        );
+    }
+
+    #[test]
+    fn an_env_value_with_quotes_or_backslashes_is_escaped() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.env = vec![("MSG".into(), "say \"hi\" c:\\x".into())];
+        let unit = render(&spec).expect("render");
+        assert!(
+            unit.contains(r#"Environment="MSG=say \"hi\" c:\\x""#),
+            "unit was:\n{unit}"
+        );
+    }
+
+    /// Percent-escaping runs before quoting, so a value needing both keeps its
+    /// doubled `%%` inside the quotes rather than having the escape mangled.
+    #[test]
+    fn an_env_value_needing_both_escapes_gets_both() {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.env = vec![("PW".into(), "50% off today".into())];
+        let unit = render(&spec).expect("render");
+        assert!(
+            unit.contains("Environment=\"PW=50%% off today\""),
+            "unit was:\n{unit}"
+        );
     }
 
     #[test]
