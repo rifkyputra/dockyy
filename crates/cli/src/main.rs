@@ -48,6 +48,8 @@ enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Recover from crashed deploys: roll back anything left in progress
+    Reconcile,
 }
 
 #[derive(Subcommand)]
@@ -159,6 +161,26 @@ async fn main() -> Result<()> {
                 SecretAction::Rm { name } => {
                     secrets::remove(&exec, &name).await?;
                     println!("removed secret {name}");
+                }
+            }
+        }
+        Command::Reconcile => {
+            use kuadrat_core::deploy::{reconcile, Ctx};
+            use kuadrat_core::store::Store;
+
+            let store = Store::open(&paths.db_path)?;
+            let ctx = Ctx {
+                exec: &exec,
+                fsys: &fsys,
+                store: &store,
+                paths: &paths,
+            };
+            let outcomes = reconcile(&ctx).await?;
+            if outcomes.is_empty() {
+                println!("nothing to reconcile");
+            } else {
+                for outcome in &outcomes {
+                    println!("{outcome:?}");
                 }
             }
         }
