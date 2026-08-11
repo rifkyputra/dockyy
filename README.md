@@ -4,9 +4,11 @@
 
 Take a git repo to a running service with TLS — on systemd, without a container daemon.
 
-> Status: **pre-alpha**. Phases 1 and 2 are merged — the CLI can build, deploy, route, hold
-> secrets, roll back, and recover from a crash. There is no daemon, web UI, or MCP surface yet.
-> See the [Guide](#guide) to use it today.
+> Status: **pre-alpha**. Phases 1 through 3 are merged — the CLI can build, deploy, route, hold
+> secrets, roll back, and recover from a crash, and `kuadrat serve` runs a daemon with a web UI for
+> status, live deploy progress, and logs. `packaging/kuadrat.service` runs it under systemd. The
+> daemon binds loopback only, with no authentication — reach it remotely over an SSH tunnel or a
+> VPN. There is no MCP surface yet. See the [Guide](#guide) to use it today.
 
 ## Why
 
@@ -231,6 +233,7 @@ expand it as a specifier.
 | `remove <name>` / `status <name>` / `list` | manage applied workloads |
 | `secret set\|ls\|rm <name>` | podman secrets; values via stdin |
 | `reconcile` | roll back deploys left in flight by a crash |
+| `serve [--listen addr]` | run the HTTP daemon: API, web UI, event stream. Loopback only |
 
 ## Design principles
 
@@ -257,8 +260,8 @@ notification delivery, metrics, backups, autonomous agent action.
 Podman 4.9.3 / Ubuntu 24.04. Podman 6 removed cgroups v1, CNI, `slirp4netns`, and BoltDB — kuadrat
 targets the modern stack, so hosts still on cgroups v1 defaults are unsupported.
 
-The daemon binds a unix socket and loopback only — reaching the UI from elsewhere is the operator's
-job via SSH tunnel or VPN.
+The daemon binds loopback only (`kuadrat serve --listen 127.0.0.1:7457` by default) — reaching the
+UI from elsewhere is the operator's job via SSH tunnel or VPN.
 
 ## Documentation
 

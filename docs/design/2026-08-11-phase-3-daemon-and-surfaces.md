@@ -352,8 +352,10 @@ phase.
 
 ## Open questions
 
-- Whether the systemd unit uses socket activation. It would let the daemon idle at zero RAM until a
-  request arrives, which suits the low-memory premise, but it complicates the reconcile-before-bind
-  ordering. Decide during H7, when the unit is written.
+- **Socket activation: decided against in H7.** The reconcile-before-bind worry turned out to be
+  unfounded — a connection waits in the accept queue while `reconcile` runs. The reason not to is
+  different: with socket activation the listen address lives in the `.socket` unit, so
+  `Config::validate`'s loopback refusal stops being what decides where the daemon is reachable, and
+  that guard is in code deliberately. Recorded in `known-gaps.md` rather than closed for good.
 - Whether `kuadrat status`/`list` should prefer the daemon when it is running rather than always
   reading the host directly. Both answers are defensible; not needed for phase 3's criterion.

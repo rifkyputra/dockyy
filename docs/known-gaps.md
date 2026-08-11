@@ -226,3 +226,12 @@ Deliberately not fixed in H6: the phase binds loopback and ships no authenticati
 token would be the only control on a surface that has no others, and it would suggest a boundary
 that is not there. It must be fixed in the same change that gives the daemon authentication or
 reachability beyond loopback — whichever comes first — and not after.
+
+## From H7 — no socket activation, and what it would take
+
+The daemon binds its own port, so it holds its memory whenever it runs — a few megabytes that a
+socket-activated unit would not. Socket activation was rejected in H7 because it moves the listen
+address into the `.socket` unit, where `Config::validate`'s loopback refusal no longer governs it.
+
+Revisit only with a replacement for that guard: the daemon would have to check the address of the
+socket it inherits and refuse a non-loopback one, which is the same rule enforced one step later.
