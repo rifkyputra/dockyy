@@ -299,7 +299,7 @@ async fn deploy_events(
     Path(id): Path<i64>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    events_sse(&st, id, &headers, sse_event)
+    events_sse(&st, id, &headers, None, sse_event)
 }
 
 /// One event on the wire.

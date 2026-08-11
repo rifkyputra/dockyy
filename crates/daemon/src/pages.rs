@@ -6,7 +6,7 @@
 //! the application wrote to its stdout and stderr". `maud::PreEscaped` does
 //! not appear in this module, and should not.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kuadrat_core::deploy::DeployStatus;
@@ -16,6 +16,7 @@ use kuadrat_core::store::DeployRow;
 use kuadrat_core::workloads::query::status;
 use maud::{html, Markup, DOCTYPE};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use serde::Deserialize;
 
 use crate::api::summarise;
 use crate::error::ApiResult;
@@ -313,8 +314,20 @@ fn event_row(ev: &StoredEvent) -> Markup {
 /// empty `sse-connect=""`. A finished deploy that still opened a stream would
 /// be a connection that can only close — the reconnect loop the 204 rule in
 /// `events_sse` exists to prevent, reintroduced here instead.
+///
+/// The connect URL carries `?resume=` at the id of the last row this render
+/// already put on the page. Without it, the browser's first `EventSource`
+/// connection carries no `Last-Event-ID` — there is nothing to reconnect
+/// from, it is the first connection — so `events_sse` would replay the whole
+/// backlog on top of the rows already rendered server-side, and htmx's
+/// `hx-swap="beforeend"` would append every one of them a second time. The
+/// query parameter is what tells the stream where the page's own render
+/// already left off; `events_sse` still lets a genuine `Last-Event-ID` win,
+/// since that reflects what the client actually received and this only
+/// reflects what one page load happened to contain.
 fn deploy_page(row: &DeployRow, events: &[StoredEvent], live: bool) -> Markup {
-    let connect = live.then(|| format!("/deploy/{}/stream", row.id));
+    let last_id = events.last().map_or(0, |ev| ev.id);
+    let connect = live.then(|| format!("/deploy/{}/stream?resume={last_id}", row.id));
     html! {
         h1 { "Deploy " (row.id) " — " (row.app) }
         p { "Status: " (row.status.as_str()) }
@@ -347,6 +360,15 @@ pub async fn deploy_detail(State(st): State<AppState>, Path(id): Path<i64>) -> R
     layout(&title, deploy_page(&row, &events, live)).into_response()
 }
 
+/// The page's own resume hint — see `deploy_page`'s doc comment for why it
+/// exists. `resume` is optional so a stream visited directly, with no page
+/// render behind it, still defaults to the whole backlog.
+#[derive(Deserialize)]
+pub struct ResumeQuery {
+    #[serde(default)]
+    resume: Option<i64>,
+}
+
 /// `GET /deploy/:id/stream`: the same `event_row` the page renders, sent as
 /// an htmx SSE fragment instead of a full page. `events_sse` owns everything
 /// about *when* an event reaches this handler; this closure only says what it
@@ -354,9 +376,12 @@ pub async fn deploy_detail(State(st): State<AppState>, Path(id): Path<i64>) -> R
 pub async fn deploy_stream(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(q): Query<ResumeQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    events_sse(&st, id, &headers, |ev| event_row(ev).into_string())
+    events_sse(&st, id, &headers, q.resume, |ev| {
+        event_row(ev).into_string()
+    })
 }
 
 /// A plain HTML 404, for page routes — kept apart from the JSON API's error
@@ -385,10 +410,22 @@ fn store_unavailable(what: &str, e: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use crate::api::tests::{body_text, get, harness_parts, post_form, sse_raw_data, stage_event};
-    use axum::http::StatusCode;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use kuadrat_core::deploy::{DeployStatus, Stage};
     use kuadrat_core::events::{Event, EventSink, EventStatus};
     use tower::ServiceExt;
+
+    /// A reconnect carrying `Last-Event-ID`, the header `EventSource` sets
+    /// itself — distinct from a plain `get`, which carries neither the header
+    /// nor a `?resume=`.
+    fn get_resuming(path: &str, last: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("last-event-id", last)
+            .body(Body::empty())
+            .expect("request")
+    }
 
     /// A terminal deploy renders its whole timeline and attaches no stream —
     /// there is nothing to wait for, and an SSE connection that can only close
@@ -434,8 +471,8 @@ mod tests {
         )
         .await;
         assert!(
-            body.contains(&format!("sse-connect=\"/deploy/{id}/stream\"")),
-            "no stream attached: {body}"
+            body.contains(&format!("sse-connect=\"/deploy/{id}/stream?resume=1\"")),
+            "no stream attached, or missing the page's resume hint: {body}"
         );
         assert!(
             body.contains("hx-swap=\"beforeend\""),
@@ -507,6 +544,110 @@ mod tests {
             page_normalized.contains(streamed[0].trim()),
             "the page and the stream disagree about a row's markup"
         );
+    }
+
+    /// A live page's own connect URL, `?resume=` at the id of the last row it
+    /// already rendered, with no `Last-Event-ID` — the shape of a browser's
+    /// *first* `EventSource` connection to a deploy with a backlog. Without
+    /// the query parameter reaching `events_sse`, this would replay the whole
+    /// backlog on top of what the page already rendered server-side and htmx
+    /// would append every row twice.
+    #[tokio::test]
+    async fn the_stream_does_not_repeat_what_the_page_already_rendered() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        let backlog = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/deploy/{id}/stream?resume={}", backlog.id)))
+            .await
+            .expect("send");
+
+        let live = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        hub.emit(&live);
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let streamed = sse_raw_data(res).await;
+        assert_eq!(
+            streamed.len(),
+            2,
+            "the backlogged detect row must not repeat: {streamed:?}"
+        );
+        assert!(streamed[0].contains("build"), "fragment: {}", streamed[0]);
+        assert!(
+            !streamed.iter().any(|f| f.contains("detect")),
+            "the row the page already rendered came down the stream again: {streamed:?}"
+        );
+    }
+
+    /// `Last-Event-ID` must win over a stale `?resume=` in the URL: it says
+    /// what the client actually received, while the query parameter only
+    /// describes what one page render happened to contain. A reconnect that
+    /// trusted the URL over the header would replay events the client already
+    /// has whenever they diverge.
+    #[tokio::test]
+    async fn last_event_id_beats_the_query_parameter_when_both_are_present() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        let first = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+        let second = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+
+        // The query parameter claims the page only got as far as `first`, but
+        // `Last-Event-ID` says the client already has `second` too — the
+        // header must be believed.
+        let res = app
+            .clone()
+            .oneshot(get_resuming(
+                &format!("/deploy/{id}/stream?resume={}", first.id),
+                &second.id.to_string(),
+            ))
+            .await
+            .expect("send");
+
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        let streamed = sse_raw_data(res).await;
+        assert_eq!(
+            streamed.len(),
+            1,
+            "the header must win: only the finish event is unseen: {streamed:?}"
+        );
+        assert!(streamed[0].contains("deploy"), "fragment: {}", streamed[0]);
     }
 
     #[tokio::test]

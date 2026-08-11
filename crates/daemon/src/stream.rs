@@ -45,7 +45,20 @@ use crate::state::AppState;
 /// Likewise the id: it comes from the store, not from `render`, so the
 /// `Last-Event-ID` resumption contract cannot be broken by a renderer that
 /// forgets to set it.
-pub fn events_sse<F>(st: &AppState, id: i64, headers: &HeaderMap, render: F) -> ApiResult<Response>
+///
+/// `query_resume` is a fallback resume point for callers that need one appended
+/// to a URL rather than carried in a header (the page's server-rendered
+/// timeline, which tells its own stream where it left off). `Last-Event-ID`
+/// always wins when present: it reflects what the client actually received,
+/// while the query parameter only describes what a page render once contained
+/// and would go stale on every subsequent connection to the same URL.
+pub fn events_sse<F>(
+    st: &AppState,
+    id: i64,
+    headers: &HeaderMap,
+    query_resume: Option<i64>,
+    render: F,
+) -> ApiResult<Response>
 where
     F: Fn(&StoredEvent) -> String + Send + 'static,
 {
@@ -83,7 +96,10 @@ where
     // all past what is already known, rather than as a promise to skip
     // events that have not happened yet.
     let last_id = backlog.last().map_or(0, |ev| ev.id);
-    let resume = resume_from(headers).min(last_id);
+    let resume = resume_from(headers)
+        .or(query_resume)
+        .unwrap_or(0)
+        .min(last_id);
 
     // A finished deploy with nothing the client has not already seen. Closing
     // a stream is how this handler says "the deploy ended" — but `EventSource`
@@ -197,13 +213,15 @@ fn to_sse_event(id: i64, data: String) -> sse::Event {
 /// itself from the `id:` field of the last event it received, so honouring it
 /// is what makes a dropped connection resume rather than replay.
 ///
-/// A value that is not a number is treated as absent. It is a hint, not a
-/// command: failing the request would break the reconnect it exists to serve,
-/// while replaying from the start is always correct and merely chattier.
-pub fn resume_from(headers: &HeaderMap) -> i64 {
+/// `None` covers both an absent header and one that is not a number — a
+/// malformed value is a hint, not a command: failing the request would break
+/// the reconnect it exists to serve, while replaying from the start is always
+/// correct and merely chattier. Distinct from `unwrap_or(0)` because
+/// `events_sse` needs to know whether the header was actually present, to give
+/// it precedence over a caller-supplied fallback resume point.
+pub fn resume_from(headers: &HeaderMap) -> Option<i64> {
     headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0)
 }
