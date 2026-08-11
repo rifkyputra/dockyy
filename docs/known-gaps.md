@@ -44,6 +44,30 @@ is rare, and reconciliation recovers a stuck lock, so this was deferred. A clean
 surface the real outcome while still signalling the release failure — worth a look once core has any
 logging/telemetry, or fold into G5 where reconciliation already owns stuck locks.
 
+## From H2 — CLI-deployed apps have no registration
+
+H2 added `app_config` (registered apps) alongside `apps` (deployed apps), but nothing back-fills
+`app_config` for an app that was already deployed from the CLI before registration existed, or that
+is deployed straight from argv without ever calling `register_app`. On the acceptance host, every
+app deployed there came from the CLI, so each has an `apps` row and no `app_config` row.
+
+Nothing is broken and no data is lost — `current_spec`, `apply`, and the rest of the deploy path
+read `apps`, not `app_config`, and none of that changes. This is a display consequence, not a data
+one: a UI app list built by calling `list_app_configs` would come back empty on a host that is
+actively running several apps, and "zero apps" is exactly what data loss would also look like to the
+operator looking at the screen, even though it isn't.
+
+Two options for the next group:
+
+1. List the union of `apps` and `app_config`, keyed by name.
+2. Have `kuadrat deploy` back-fill `register_app` with its argv repo path on every run, so the two
+   tables converge on their own.
+
+Option 2 is preferred. It is smaller — the UI needs no union/merge logic, `list_app_configs` stays
+the one source the app list reads from. It repairs the host incrementally, after one deploy per app,
+with no migration step. And it makes the CLI and the UI agree on what "an app" is going forward,
+rather than leaving `apps` and `app_config` as two answers to the same question indefinitely.
+
 ## Acceptance — PASSED 2026-08-10
 
 Phase 1's done criterion is met. `scripts/acceptance.sh` ran on a real host (Ubuntu 24.04.4,

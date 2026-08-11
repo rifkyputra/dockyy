@@ -157,6 +157,32 @@ edited outside kuadrat, and the read refuses it rather than serving half a route
 both columns unconditionally, including when the route is `None`: an upsert that skipped nulls would
 make clearing a route impossible, leaving an app served on a domain the operator had just removed.
 
+**Authority rule.** `app_config` and `apps.spec_json` can each carry a `route`, and nothing so far
+has said which one wins on a deploy. The rule: `app_config` is the operator's intent and is
+authoritative for `repo_path` and `route`; `apps` is the deploy record and is authoritative for
+`image` and the resolved spec. When an `app_config` row exists, a deploy must assign
+`spec.route = config.route` unconditionally — including `None`. **Do not** wire this through
+`resolve_spec(app, repo, store, route_override: Option<Route>)` in `crates/cli/src/resolve.rs` by
+passing `config.route` as `route_override` — in `resolve_spec`, `None` means "don't override" (keep
+whatever route the repo's `kuadrat.json` or the stored spec already carries), not "no route". That
+reading is the obvious one for the next group to reach for, and it is exactly wrong here: this group
+made clearing a route work on purpose (an unconditional upsert, and the test
+`re_registering_without_a_route_clears_the_previous_one`), and routing through `route_override` would
+make that silently ineffective — the operator clears a route in the UI, the next deploy re-applies
+the old one from the stored spec, and the Caddy fragment goes back up.
+
+One consequence worth flagging for the next group: `WorkloadSpec::validate` (`crates/core/src/spec.rs`)
+rejects a spec that has a `route` but no `health_cmd`. So a UI "add a domain" action can fail a
+deploy for a reason that, from the UI's point of view, looks unrelated to the domain field it just
+changed — the fix is in `health_cmd`, not in the route.
+
+**`repo_path` validation.** `register_app` rejects a relative `repo_path`: the daemon runs under
+systemd with `/` as its working directory, not the operator's shell, so a relative path resolves
+against the wrong place. It deliberately does **not** check for `..` traversal or symlinks in the
+path — the operator who registers an app already has that filesystem access by the time they can
+reach the registration API (loopback-only, no auth in this phase), so checking here would not move
+the trust boundary, only add a check that looks like a security control without being one.
+
 ## Surfaces
 
 ### Pages
