@@ -166,4 +166,23 @@ code never writes a secret to a log — the secrets stage reports names only —
 for what a deployed application logs.
 
 This is why the daemon binds loopback and ships no authentication: log content is as sensitive as
-the least careful app on the host.
+the least careful app on the host. Log lines also pass through lossy UTF-8 conversion and may
+carry ANSI escapes, control characters, and HTML such as `<script>`; escaping belongs at the
+render boundary in the web UI, not in this module, because escaping here would corrupt the JSON
+consumer.
+
+## From H3 — the privilege signal trusts an inherited environment variable
+
+`logs::journal_unreadable` tells "this app is quiet" apart from "this process cannot read the
+journal" by matching journald's stderr hint. That hint is emitted through systemd's logging,
+which honours `$SYSTEMD_LOG_LEVEL` from the process's environment, and `LocalExecutor` runs
+`Command::output()` inheriting whatever environment the daemon started with. A daemon started
+with `SYSTEMD_LOG_LEVEL=warning` or higher gets journalctl's hint suppressed exactly as `-q`
+would have — empty stderr, exit 0 — and `logs::tail`/`logs::search` silently return `Ok(vec![])`
+for a journal they were never able to read, indistinguishable from a genuinely quiet unit.
+
+`Executor` has no environment parameter today, so this cannot be closed inside `logs`. Two
+things carry forward: operationally, `SYSTEMD_LOG_LEVEL` must not be set to `warning` or above
+for the daemon's process; and structurally, pinning `SYSTEMD_LOG_LEVEL=info` and `LC_ALL=C` for
+the journalctl child specifically belongs with a future `Executor` env parameter, not a
+workaround in this module.
