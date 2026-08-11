@@ -14,6 +14,7 @@ pub mod hub;
 pub mod pages;
 pub mod state;
 pub mod stream;
+pub mod webhook;
 
 use std::sync::Arc;
 
