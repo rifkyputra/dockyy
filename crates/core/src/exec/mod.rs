@@ -74,6 +74,67 @@ mod tests {
         assert_eq!(out.stdout.trim(), "hello");
     }
 
+    /// Regression test for the orphan-process bug: callers now wrap `exec.run`
+    /// in `tokio::time::timeout` (the healthcheck stage) and drop the future
+    /// when the deadline fires. Without `kill_on_drop(true)` on the underlying
+    /// `Command`, the spawned child keeps running after its future is gone.
+    ///
+    /// The child writes its own PID to a file, then sleeps far longer than the
+    /// timeout below. We drop the `run` future via `timeout`, then poll `/proc`
+    /// for that PID to confirm the process actually exits. The 2s poll budget
+    /// is generous relative to the 50ms timeout, so this should not be flaky
+    /// on any machine that can run a shell at all.
+    #[tokio::test]
+    async fn local_executor_kills_child_when_future_is_dropped() {
+        let dir = std::env::temp_dir();
+        let pidfile = dir.join(format!("kuadrat-kill-on-drop-test-{}", std::process::id()));
+        let pidfile_str = pidfile.to_str().expect("utf8 path").to_string();
+        let _ = std::fs::remove_file(&pidfile);
+
+        let exec = LocalExecutor;
+        let script = format!("echo $$ > {pidfile_str}; sleep 30");
+        let args = ["-c".to_string(), script];
+        let fut = exec.run("sh", &args);
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), fut).await;
+        assert!(
+            result.is_err(),
+            "the command should still be running at 50ms"
+        );
+        // `result` (and the dropped `fut` inside it) is gone now; `kill_on_drop`
+        // should have signaled the child as part of that drop.
+
+        // Wait for the PID file to appear, then confirm the process it names
+        // is gone. Poll rather than sleep-and-check-once so this isn't tied to
+        // one guessed timing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(contents) = std::fs::read_to_string(&pidfile) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never wrote its pid file"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+
+        loop {
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child pid {pid} is still alive; kill_on_drop did not kill it"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
     #[tokio::test]
     async fn fake_executor_returns_scripted_output_and_records_calls() {
         let fake = FakeExecutor::new();

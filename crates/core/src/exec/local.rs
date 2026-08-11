@@ -11,8 +11,13 @@ pub struct LocalExecutor;
 #[async_trait]
 impl Executor for LocalExecutor {
     async fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
+        // `kill_on_drop(true)`: callers now wrap this future in `tokio::time::timeout`
+        // (e.g. the healthcheck stage) and drop it when the deadline fires. Without
+        // this, the spawned child keeps running after its future is gone — an orphan
+        // process that is invisible to everything kuadrat can see.
         let output = Command::new(program)
             .args(args)
+            .kill_on_drop(true)
             .output()
             .await
             .with_context(|| format!("failed to run `{program}`"))?;
@@ -32,11 +37,14 @@ impl Executor for LocalExecutor {
     ) -> Result<CommandOutput> {
         use std::process::Stdio;
 
+        // See `run` above: `kill_on_drop(true)` ensures a dropped future (e.g. on
+        // timeout) does not leave this child running as an untracked orphan.
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn `{program}`"))?;
 
