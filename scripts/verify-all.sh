@@ -22,6 +22,7 @@ SCRIPTS=(
   secrets-acceptance.sh
   deploy-acceptance.sh
   reconcile-acceptance.sh
+  serve-acceptance.sh
 )
 
 declare -a NAMES=() RESULTS=()

@@ -6,9 +6,10 @@ Take a git repo to a running service with TLS — on systemd, without a containe
 
 > Status: **pre-alpha**. Phases 1 through 3 are merged — the CLI can build, deploy, route, hold
 > secrets, roll back, and recover from a crash, and `kuadrat serve` runs a daemon with a web UI for
-> status, live deploy progress, and logs. `packaging/kuadrat.service` runs it under systemd. The
-> daemon binds loopback only, with no authentication — reach it remotely over an SSH tunnel or a
-> VPN. There is no MCP surface yet. See the [Guide](#guide) to use it today.
+> status, live deploy progress, logs, and an optional webhook on terminal outcomes and stage
+> failures. `packaging/kuadrat.service` runs it under systemd. The daemon binds loopback only, with
+> no authentication — reach it remotely over an SSH tunnel or a VPN. There is no MCP surface yet.
+> See the [Guide](#guide) to use it today.
 
 ## Why
 
@@ -234,6 +235,24 @@ expand it as a specifier.
 | `secret set\|ls\|rm <name>` | podman secrets; values via stdin |
 | `reconcile` | roll back deploys left in flight by a crash |
 | `serve [--listen addr]` | run the HTTP daemon: API, web UI, event stream. Loopback only |
+
+### The webhook
+
+`kuadrat serve` can POST a JSON message to a webhook whenever a deploy reaches a terminal outcome
+(`Done`, `RolledBack`, `Failed`) or a stage fails — not every event, just the ones worth a line in
+chat.
+
+Configure it with one of:
+
+| Variable | Value |
+|---|---|
+| `KUADRAT_WEBHOOK_URL` | the URL directly |
+| `KUADRAT_WEBHOOK_URL_FILE` | path to a file containing the URL |
+
+A webhook URL carries its token in its path, so prefer `KUADRAT_WEBHOOK_URL_FILE`: a systemd
+`Environment=` line is readable by anyone who can run `systemctl show`, but a file loaded through
+`LoadCredential=`, or via `EnvironmentFile=` as in `packaging/kuadrat.service`, is not. Neither
+variable, nor the URL itself, ever reaches argv — see `crates/daemon/src/webhook.rs`.
 
 ## Design principles
 

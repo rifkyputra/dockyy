@@ -234,3 +234,14 @@ address into the `.socket` unit, where `Config::validate`'s loopback refusal no 
 
 Revisit only with a replacement for that guard: the daemon would have to check the address of the
 socket it inherits and refuse a non-loopback one, which is the same rule enforced one step later.
+
+## H7 acceptance — UNRUN
+
+`scripts/serve-acceptance.sh` exists and is wired into `scripts/verify-all.sh`, but it has never
+been run. It needs root (system Quadlet units + `daemon-reload`) and starts a real daemon on this
+host, which is why it is not run automatically. Run it with:
+
+```bash
+PATH=$HOME/.cargo/bin:$PATH cargo build --release
+sudo bash scripts/serve-acceptance.sh
+```
