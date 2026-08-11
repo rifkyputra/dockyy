@@ -3,7 +3,6 @@
 
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -305,18 +304,14 @@ async fn deploy_events(
 
 /// One event on the wire.
 ///
-/// The SSE `id` is the store's id, which is what makes `Last-Event-ID`
-/// resumption work without the handler keeping any per-connection state. The
-/// payload is the same `EventOut` the JSON API returns, so a page renders a
-/// streamed event and a fetched one through one code path.
-fn sse_event(ev: &StoredEvent) -> sse::Event {
+/// The payload is the same `EventOut` the JSON API returns, so a page renders
+/// a streamed event and a fetched one through one code path. `events_sse`
+/// builds the actual `sse::Event` — id from the store, payload sanitised — so
+/// this only has to say what the payload is.
+fn sse_event(ev: &StoredEvent) -> String {
     let out = EventOut::from(ev.clone());
-    let id = out.id.to_string();
-    sse::Event::default()
-        .id(id)
-        // `EventOut` is five owned scalars; serialization cannot fail.
-        .json_data(&out)
-        .expect("EventOut serializes")
+    // `EventOut` is five owned scalars; serialization cannot fail.
+    serde_json::to_string(&out).expect("EventOut serializes")
 }
 
 // ------------------------------------------------------------------- helpers

@@ -31,9 +31,23 @@ use crate::state::AppState;
 /// filter drops the duplicate. A duplicate is recoverable; a gap is not. The
 /// row read carries no ordering requirement of its own and sits behind the
 /// subscription only so that nobody has to reason about which reads count.
+///
+/// `render` returns the payload, not a finished `sse::Event` — building the
+/// event is this function's job, not the renderer's. `sse::Event::data`
+/// panics if its argument contains a `\r` (`axum`'s SSE writer asserts no
+/// field value does; the wire format is line-based, and a bare CR breaks its
+/// framing) and event details are `format!("{err:#}")` of a stage failure,
+/// which can embed raw command stderr — `podman build` in particular routinely
+/// emits `\r`. Parameterising the renderer moved that constraint out of the
+/// engine and into whichever closure happened to satisfy it by accident (JSON
+/// escaping does; string interpolation does not); sanitising here, once, makes
+/// it structural instead — true of every renderer, including the next one.
+/// Likewise the id: it comes from the store, not from `render`, so the
+/// `Last-Event-ID` resumption contract cannot be broken by a renderer that
+/// forgets to set it.
 pub fn events_sse<F>(st: &AppState, id: i64, headers: &HeaderMap, render: F) -> ApiResult<Response>
 where
-    F: Fn(&StoredEvent) -> sse::Event + Send + 'static,
+    F: Fn(&StoredEvent) -> String + Send + 'static,
 {
     // Subscribing has no side effect and costs nothing, so it happens before
     // every other step here — including the 404 check below.
@@ -97,7 +111,7 @@ where
             }
             last_sent = ev.id;
             ended = is_finished(&ev);
-            yield Ok::<_, std::convert::Infallible>(render(&ev));
+            yield Ok::<_, std::convert::Infallible>(to_sse_event(ev.id, render(&ev)));
         }
 
         // Nothing more can arrive for a deploy that has already ended. The
@@ -117,7 +131,7 @@ where
                     }
                     last_sent = ev.id;
                     let ends_here = is_finished(&ev);
-                    yield Ok::<_, std::convert::Infallible>(render(&ev));
+                    yield Ok::<_, std::convert::Infallible>(to_sse_event(ev.id, render(&ev)));
                     if ends_here {
                         return;
                     }
@@ -149,7 +163,7 @@ where
                         }
                         last_sent = ev.id;
                         let ends_here = is_finished(&ev);
-                        yield Ok::<_, std::convert::Infallible>(render(&ev));
+                        yield Ok::<_, std::convert::Infallible>(to_sse_event(ev.id, render(&ev)));
                         if ends_here {
                             return;
                         }
@@ -168,6 +182,15 @@ where
 
 fn is_finished(ev: &StoredEvent) -> bool {
     matches!(ev.event.kind, EventKind::Finished { .. })
+}
+
+/// Build the wire `sse::Event` for one stored event from a renderer's
+/// payload. The id always comes from the store, never from `render` — see
+/// `events_sse`'s doc comment for why that and the `\r`/`\n` sanitisation both
+/// live here instead of in each renderer.
+fn to_sse_event(id: i64, data: String) -> sse::Event {
+    let sanitized = data.replace(['\r', '\n'], " ");
+    sse::Event::default().id(id.to_string()).data(sanitized)
 }
 
 /// The id a reconnecting browser last saw. `EventSource` sets this header

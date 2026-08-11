@@ -8,7 +8,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{sse, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use kuadrat_core::deploy::DeployStatus;
 use kuadrat_core::events::StoredEvent;
 use kuadrat_core::logs::tail;
@@ -356,11 +356,7 @@ pub async fn deploy_stream(
     Path(id): Path<i64>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    events_sse(&st, id, &headers, |ev| {
-        sse::Event::default()
-            .id(ev.id.to_string())
-            .data(event_row(ev).into_string())
-    })
+    events_sse(&st, id, &headers, |ev| event_row(ev).into_string())
 }
 
 /// A plain HTML 404, for page routes — kept apart from the JSON API's error
@@ -449,6 +445,14 @@ mod tests {
 
     /// The stream sends the same fragment the page renders. If these diverge, a
     /// row that arrived live looks different from the same row after a reload.
+    ///
+    /// The live event's detail carries a `\r` — a `podman build` stderr line
+    /// routinely does, and `sse::Event::data` panics on one
+    /// (`axum-0.7.9/src/response/sse.rs`'s `field()` asserts no value contains
+    /// a carriage return). A detail-less event never traverses the branch that
+    /// interpolates it, which is exactly the gap that let the panic through
+    /// the original review: this pins that the stream survives it and the row
+    /// still matches the page's.
     #[tokio::test]
     async fn the_stream_sends_the_same_row_markup_the_page_renders() {
         let (app, store, hub, _d) = harness_parts();
@@ -465,7 +469,7 @@ mod tests {
                 id,
                 Stage::Build,
                 EventStatus::Started,
-                None,
+                Some("podman build failed: line one\rline two".to_string()),
             ))
             .expect("append");
         hub.emit(&live);
@@ -481,6 +485,11 @@ mod tests {
             "fragment must be a row: {}",
             streamed[0]
         );
+        assert!(
+            !streamed[0].contains('\r'),
+            "a raw CR must not reach the wire: {}",
+            streamed[0]
+        );
 
         let page = body_text(
             app.oneshot(get(&format!("/deploy/{id}")))
@@ -488,8 +497,14 @@ mod tests {
                 .expect("send"),
         )
         .await;
+        // The page renders the detail's raw `\r` as-is — nothing about a
+        // static server-side render needs `sse::Event::data`'s validity rules
+        // — so the comparison normalises both sides the same way the SSE
+        // engine normalises the wire payload, rather than expecting a
+        // byte-for-byte match the sanitisation deliberately breaks.
+        let page_normalized = page.replace(['\r', '\n'], " ");
         assert!(
-            page.contains(streamed[0].trim()),
+            page_normalized.contains(streamed[0].trim()),
             "the page and the stream disagree about a row's markup"
         );
     }
