@@ -12,7 +12,7 @@
 //! reversed one. A second copy of that would be a second place for it to rot
 //! silently.
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use kuadrat_core::deploy::DeployStatus;
@@ -68,7 +68,24 @@ where
     // or close. Clamping treats that case the same as no resume point at
     // all past what is already known, rather than as a promise to skip
     // events that have not happened yet.
-    let resume = resume_from(headers).min(backlog.last().map_or(0, |ev| ev.id));
+    let last_id = backlog.last().map_or(0, |ev| ev.id);
+    let resume = resume_from(headers).min(last_id);
+
+    // A finished deploy with nothing the client has not already seen. Closing
+    // a stream is how this handler says "the deploy ended" — but `EventSource`
+    // reads a closed stream as a dropped connection and reconnects a few
+    // seconds later, forever. `204 No Content` is the response the HTML
+    // specification defines as "do not reconnect", so a finished deploy left
+    // open in a tab goes quiet after exactly one extra round trip.
+    //
+    // Both halves of the condition earn their place. Without `already_terminal`
+    // a live deploy that a viewer is caught up with would be told to go away
+    // mid-run. Without the seen-everything half, the *first* connection to a
+    // finished deploy would get a 204 and render an empty timeline instead of
+    // its history.
+    if already_terminal && resume >= last_id {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
 
     let stream = async_stream::stream! {
         let mut last_sent = resume;

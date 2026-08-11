@@ -673,6 +673,87 @@ mod tests {
         assert!(sse_data(res).await.is_empty());
     }
 
+    /// The reconnect a browser makes after the stream closes. It carries a
+    /// `Last-Event-ID` at the end of the log, and there is nothing left to
+    /// send — so the answer must be the one that stops `EventSource` from
+    /// coming back, not another empty 200 that invites it to.
+    #[tokio::test]
+    async fn a_reconnect_with_nothing_left_is_a_204_so_the_browser_stops() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        stage_event(&store, id, Stage::Detect, EventStatus::Started);
+        let last = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let res = app
+            .oneshot(get_resuming(
+                &format!("/api/deploys/{id}/events"),
+                &last.id.to_string(),
+            ))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// The *first* connection to a finished deploy is not a reconnect: the
+    /// client has seen nothing, so it must still get the whole timeline. A 204
+    /// here would leave the page permanently blank.
+    #[tokio::test]
+    async fn a_first_connection_to_a_finished_deploy_still_gets_its_timeline() {
+        let (app, store, _hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        stage_event(&store, id, Stage::Detect, EventStatus::Started);
+        store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        store
+            .finish_deploy(id, DeployStatus::Done, None)
+            .expect("finish");
+
+        let res = app
+            .oneshot(get(&format!("/api/deploys/{id}/events")))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(sse_data(res).await.len(), 2);
+    }
+
+    /// An in-progress deploy whose events the client has all seen is not
+    /// finished — more are coming, so the stream must stay open.
+    #[tokio::test]
+    async fn an_in_progress_deploy_stays_open_even_when_fully_caught_up() {
+        let (app, store, hub, _d) = harness_parts();
+        let id = store.create_deploy("web").expect("create");
+        let seen = store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
+            .expect("append");
+
+        let res = app
+            .oneshot(get_resuming(
+                &format!("/api/deploys/{id}/events"),
+                &seen.id.to_string(),
+            ))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let end = store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+        hub.emit(&end);
+
+        assert_eq!(sse_data(res).await.len(), 1);
+    }
+
     /// Backlog then live, in order and without a gap — the first of the three
     /// cases the design names.
     #[tokio::test]
