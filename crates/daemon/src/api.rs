@@ -288,21 +288,21 @@ async fn get_deploy(
 /// One deploy's events: the stored backlog, then everything that happens
 /// after, closing when the deploy ends.
 ///
-/// **The subscribe happens before any read — the deploy row and the backlog
-/// both — and the order is load-bearing.** An event landing between a read
-/// and the subscribe would be lost permanently, and it is exactly the stage
-/// transition the viewer is waiting for. Subscribing first turns that loss
-/// into a duplicate, and the `id > last_sent` filter drops duplicates. A
+/// **The subscribe happens before any read, and the order relative to the
+/// backlog read is load-bearing.** An event landing between the backlog read
+/// and the subscribe would be lost permanently — there is no later chance to
+/// see it — and it is exactly the stage transition the viewer is waiting
+/// for. Subscribing first turns that loss into a duplicate instead: the
+/// event arrives once from the backlog and once (redundantly) over the
+/// channel, and the `id > last_sent` filter at the join drops the repeat. A
 /// duplicate is recoverable; a gap is not.
 ///
-/// This applies to the row fetch too, not just the backlog: `already_terminal`
-/// is read off `row.status`, and a stale pre-subscribe snapshot of that status
-/// can miss a terminal transition that appends no event — `reserve` rejecting
-/// a duplicate calls `finish_deploy` and emits nothing. Fetch the row first
-/// and a deploy could flip to terminal in the gap before the subscribe, with
-/// no event in the backlog and nothing published to the hub to say so; the
-/// stream would then wait on `rx.recv()` for a deploy that can never speak
-/// again.
+/// The deploy-row read is included ahead of the subscribe too, but only so
+/// nobody has to reason about which of the two reads counts — it carries no
+/// ordering requirement of its own. `already_terminal` exists to catch the
+/// one path that ends a deploy without an event at all (`reserve` rejecting
+/// a duplicate calls plain `finish_deploy`), and that is handled by the
+/// `already_terminal` check below, not by when the row happens to be read.
 async fn deploy_events(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -385,6 +385,13 @@ async fn deploy_events(
                 // SQLite — they were persisted before they were published — so
                 // re-read from the last id sent and resume. This is the same
                 // path a reconnection takes.
+                //
+                // `events_for` re-reads every event for the deploy rather than
+                // querying `WHERE id > last_sent`: a deploy has on the order of
+                // thirteen events total, so the wasted rows are noise, and this
+                // is a deliberate choice at that scale, not an oversight — a
+                // deploy with orders of magnitude more events would want the
+                // narrower query.
                 Err(RecvError::Lagged(_)) => {
                     let missed = match store.events_for(id) {
                         Ok(evs) => evs,

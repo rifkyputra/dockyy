@@ -175,7 +175,7 @@ same family and should be closed when secrets handling lands.
 
 ## From H3 — journald content is not sanitised
 
-`logs::tail` and `logs::search` (when it arrives) return whatever the application wrote to its
+`logs::tail` and `logs::search` return whatever the application wrote to its
 stdout and stderr. A workload that logs a token or a password will have that value returned by
 this module and, from H4 onward, rendered in the web UI and served over the API. kuadrat's own
 code never writes a secret to a log — the secrets stage reports names only — but it cannot vouch
