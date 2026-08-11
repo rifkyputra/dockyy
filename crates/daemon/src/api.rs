@@ -85,11 +85,14 @@ pub struct EventOut {
 
 impl From<StoredEvent> for EventOut {
     fn from(e: StoredEvent) -> Self {
+        // The same projection the store writes, so a streamed event, a fetched
+        // event, and the database row all spell a stage the same way.
+        let (stage, status) = e.event.kind.columns();
         Self {
             id: e.id,
             at: e.at,
-            stage: e.event.stage.as_str().to_string(),
-            status: e.event.status.as_str().to_string(),
+            stage: stage.to_string(),
+            status: status.to_string(),
             detail: e.event.detail,
         }
     }
@@ -434,10 +437,17 @@ mod tests {
     async fn an_unknown_app_is_a_404_on_read_and_on_deploy() {
         let (app, _store, _d) = harness();
 
-        let res = app.clone().oneshot(get("/api/apps/ghost")).await.expect("send");
+        let res = app
+            .clone()
+            .oneshot(get("/api/apps/ghost"))
+            .await
+            .expect("send");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-        let res = app.oneshot(post("/api/apps/ghost/deploy")).await.expect("send");
+        let res = app
+            .oneshot(post("/api/apps/ghost/deploy"))
+            .await
+            .expect("send");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
@@ -455,7 +465,10 @@ mod tests {
             .await
             .expect("send");
 
-        let res = app.oneshot(post("/api/apps/web/deploy")).await.expect("send");
+        let res = app
+            .oneshot(post("/api/apps/web/deploy"))
+            .await
+            .expect("send");
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -475,7 +488,10 @@ mod tests {
         let id = store.create_deploy("web").expect("create");
         assert!(store.acquire_lock("web", id).expect("lock"));
 
-        let res = app.oneshot(post("/api/apps/web/deploy")).await.expect("send");
+        let res = app
+            .oneshot(post("/api/apps/web/deploy"))
+            .await
+            .expect("send");
         assert_eq!(res.status(), StatusCode::CONFLICT);
     }
 
@@ -484,7 +500,10 @@ mod tests {
         // An empty list would read as "this app is quiet" for an app that does
         // not exist at all.
         let (app, _store, _d) = harness();
-        let res = app.oneshot(get("/api/apps/ghost/logs")).await.expect("send");
+        let res = app
+            .oneshot(get("/api/apps/ghost/logs"))
+            .await
+            .expect("send");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
@@ -524,7 +543,10 @@ mod tests {
 
         let body = body_json(res).await;
         assert_eq!(body["name"], "web");
-        assert!(body["lines"][0].as_str().unwrap().contains("up"), "was: {body}");
+        assert!(
+            body["lines"][0].as_str().unwrap().contains("up"),
+            "was: {body}"
+        );
     }
 
     #[tokio::test]
@@ -542,12 +564,12 @@ mod tests {
         let (app, store, _d) = harness();
         let id = store.create_deploy("web").expect("create");
         store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Build,
-                status: EventStatus::Started,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
             .expect("event");
 
         let res = app

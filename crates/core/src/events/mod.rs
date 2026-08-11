@@ -6,7 +6,7 @@
 pub mod fake;
 pub mod null;
 
-use crate::deploy::Stage;
+use crate::deploy::{DeployStatus, Stage};
 
 /// What happened to a stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,13 +36,80 @@ impl EventStatus {
     }
 }
 
+/// The stage-column literal that marks a deploy-level event.
+///
+/// Not one of the six stage names, and `Stage::from_str` returns `None` for
+/// it, so a reader that predates deploy-level events fails loudly on such a
+/// row rather than misreading it as a stage.
+pub const DEPLOY_ROW: &str = "deploy";
+
+/// What an event is about: one stage of the deploy loop, or the deploy as a
+/// whole reaching its terminal status.
+///
+/// The second variant exists because the `deploys` table and the event log
+/// used to disagree about where a deploy's story ends. The table recorded
+/// `Done`/`RolledBack`/`Failed`; the log stopped at the last stage event, so a
+/// finished deploy was indistinguishable from one that stalled, and a rollback
+/// that *succeeded* was invisible — a watcher saw "Apply failed" and silence.
+/// The SSE stream closes on this variant, which is why it is a stored event
+/// rather than a flag the handler computes.
+///
+/// `Finished` carries a `DeployStatus`, which can also spell `InProgress`.
+/// That looseness is inherited deliberately from `Store::finish_deploy`, which
+/// has the same signature — one vocabulary for one concept beats a second
+/// enum and a conversion at every call site. The read path rejects a
+/// non-terminal deploy-level row, so a corrupt one cannot be mistaken for a
+/// real ending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Stage { stage: Stage, status: EventStatus },
+    Finished { status: DeployStatus },
+}
+
+impl EventKind {
+    /// The `(stage, status)` column pair this kind is stored as — and, because
+    /// the daemon's wire type uses the same projection, the pair a client
+    /// sees. Having one function answer both questions is what keeps the
+    /// database spelling and the JSON spelling from drifting apart.
+    pub fn columns(&self) -> (&'static str, &'static str) {
+        match self {
+            EventKind::Stage { stage, status } => (stage.as_str(), status.as_str()),
+            EventKind::Finished { status } => (DEPLOY_ROW, status.as_str()),
+        }
+    }
+}
+
 /// One durable event in a deploy's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     pub deploy_id: i64,
-    pub stage: Stage,
-    pub status: EventStatus,
+    pub kind: EventKind,
     pub detail: Option<String>,
+}
+
+impl Event {
+    /// An event about one stage of the deploy loop.
+    pub fn for_stage(
+        deploy_id: i64,
+        stage: Stage,
+        status: EventStatus,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            deploy_id,
+            kind: EventKind::Stage { stage, status },
+            detail,
+        }
+    }
+
+    /// An event about the deploy as a whole reaching a terminal status.
+    pub fn finished(deploy_id: i64, status: DeployStatus, detail: Option<String>) -> Self {
+        Self {
+            deploy_id,
+            kind: EventKind::Finished { status },
+            detail,
+        }
+    }
 }
 
 /// An event as it exists after the store has written it: the same event, plus
@@ -98,15 +165,20 @@ mod tests {
 
     #[test]
     fn an_event_carries_its_stage_and_detail() {
-        let ev = Event {
-            deploy_id: 7,
-            stage: Stage::Build,
-            status: EventStatus::Failed,
-            detail: Some("image build failed".into()),
-        };
+        let ev = Event::for_stage(
+            7,
+            Stage::Build,
+            EventStatus::Failed,
+            Some("image build failed".into()),
+        );
         assert_eq!(ev.deploy_id, 7);
-        assert_eq!(ev.stage, Stage::Build);
-        assert_eq!(ev.status, EventStatus::Failed);
+        assert_eq!(
+            ev.kind,
+            EventKind::Stage {
+                stage: Stage::Build,
+                status: EventStatus::Failed
+            }
+        );
         assert_eq!(ev.detail.as_deref(), Some("image build failed"));
     }
 
@@ -114,12 +186,7 @@ mod tests {
         StoredEvent {
             id,
             at: "2026-01-01 00:00:00".into(),
-            event: Event {
-                deploy_id: 1,
-                stage,
-                status,
-                detail: None,
-            },
+            event: Event::for_stage(1, stage, status, None),
         }
     }
 
@@ -132,7 +199,13 @@ mod tests {
         let seen = sink.events();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].id, 1);
-        assert_eq!(seen[1].event.status, EventStatus::Succeeded);
+        assert_eq!(
+            seen[1].event.kind,
+            EventKind::Stage {
+                stage: Stage::Build,
+                status: EventStatus::Succeeded
+            }
+        );
     }
 
     /// The shape most deploy tests assert on: which stages happened, and how

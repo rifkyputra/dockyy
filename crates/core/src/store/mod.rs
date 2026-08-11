@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::deploy::{DeployStatus, Stage};
-use crate::events::{Event, EventStatus, StoredEvent};
+use crate::events::{Event, EventKind, EventStatus, StoredEvent, DEPLOY_ROW};
 use crate::spec::Route;
 
 // Inter-table references (deploys.app, events.deploy_id, locks.deploy_id) are
@@ -270,16 +270,12 @@ impl Store {
     /// and the timestamp in the one round trip that created them.
     pub fn append_event(&self, event: &Event) -> Result<StoredEvent> {
         let conn = self.conn.lock().expect("store lock");
+        let (stage, status) = event.kind.columns();
         let (id, at) = conn
             .query_row(
                 "INSERT INTO events (deploy_id, stage, status, detail)
                  VALUES (?1, ?2, ?3, ?4) RETURNING id, at",
-                params![
-                    event.deploy_id,
-                    event.stage.as_str(),
-                    event.status.as_str(),
-                    event.detail
-                ],
+                params![event.deploy_id, stage, status, event.detail],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .context("appending event")?;
@@ -476,17 +472,28 @@ fn build_event(
     status_s: String,
     detail: Option<String>,
 ) -> Result<StoredEvent> {
-    let stage = Stage::from_str(&stage_s)
-        .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown stage {stage_s:?}"))?;
-    let status = EventStatus::from_str(&status_s)
-        .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}"))?;
+    let kind = if stage_s == DEPLOY_ROW {
+        let status = DeployStatus::from_str(&status_s).ok_or_else(|| {
+            anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}")
+        })?;
+        if status == DeployStatus::InProgress {
+            bail!("event for deploy {deploy_id} is deploy-level but not terminal");
+        }
+        EventKind::Finished { status }
+    } else {
+        let stage = Stage::from_str(&stage_s)
+            .ok_or_else(|| anyhow!("event for deploy {deploy_id} has unknown stage {stage_s:?}"))?;
+        let status = EventStatus::from_str(&status_s).ok_or_else(|| {
+            anyhow!("event for deploy {deploy_id} has unknown status {status_s:?}")
+        })?;
+        EventKind::Stage { stage, status }
+    };
     Ok(StoredEvent {
         id,
         at,
         event: Event {
             deploy_id,
-            stage,
-            status,
+            kind,
             detail,
         },
     })
@@ -714,27 +721,38 @@ mod tests {
         let id = store.create_deploy("web").expect("create");
 
         store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Detect,
-                status: EventStatus::Started,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
             .expect("first");
         store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Build,
-                status: EventStatus::Failed,
-                detail: Some("build broke".into()),
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Failed,
+                Some("build broke".into()),
+            ))
             .expect("second");
 
         let events = store.events_for(id).expect("read");
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event.stage, Stage::Detect);
-        assert_eq!(events[0].event.status, EventStatus::Started);
-        assert_eq!(events[1].event.stage, Stage::Build);
+        assert_eq!(
+            events[0].event.kind,
+            EventKind::Stage {
+                stage: Stage::Detect,
+                status: EventStatus::Started
+            }
+        );
+        assert_eq!(
+            events[1].event.kind,
+            EventKind::Stage {
+                stage: Stage::Build,
+                status: EventStatus::Failed
+            }
+        );
         assert_eq!(events[1].event.detail.as_deref(), Some("build broke"));
     }
 
@@ -744,12 +762,12 @@ mod tests {
         let a = store.create_deploy("a").expect("a");
         let b = store.create_deploy("b").expect("b");
         store
-            .append_event(&Event {
-                deploy_id: a,
-                stage: Stage::Detect,
-                status: EventStatus::Started,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                a,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
             .expect("append a");
 
         assert_eq!(store.events_for(a).expect("a").len(), 1);
@@ -765,20 +783,20 @@ mod tests {
         let id = store.create_deploy("web").expect("create");
 
         store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Detect,
-                status: EventStatus::Started,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Started,
+                None,
+            ))
             .expect("first");
         store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Detect,
-                status: EventStatus::Succeeded,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Detect,
+                EventStatus::Succeeded,
+                None,
+            ))
             .expect("second");
 
         let events = store.events_for(id).expect("read");
@@ -799,21 +817,21 @@ mod tests {
         let id = store.create_deploy("web").unwrap();
 
         let first = store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Build,
-                status: EventStatus::Started,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Started,
+                None,
+            ))
             .expect("append")
             .id;
         let second = store
-            .append_event(&Event {
-                deploy_id: id,
-                stage: Stage::Build,
-                status: EventStatus::Succeeded,
-                detail: None,
-            })
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Succeeded,
+                None,
+            ))
             .expect("append")
             .id;
 
@@ -836,12 +854,7 @@ mod tests {
         for status in [EventStatus::Started, EventStatus::Succeeded] {
             appended.push(
                 store
-                    .append_event(&Event {
-                        deploy_id: id,
-                        stage: Stage::Apply,
-                        status,
-                        detail: None,
-                    })
+                    .append_event(&Event::for_stage(id, Stage::Apply, status, None))
                     .expect("append")
                     .id,
             );
@@ -865,12 +878,7 @@ mod tests {
         let a = store.create_deploy("a").unwrap();
         let b = store.create_deploy("b").unwrap();
 
-        let ev = |deploy_id| Event {
-            deploy_id,
-            stage: Stage::Detect,
-            status: EventStatus::Started,
-            detail: None,
-        };
+        let ev = |deploy_id| Event::for_stage(deploy_id, Stage::Detect, EventStatus::Started, None);
         let first = store.append_event(&ev(a)).expect("append").id;
         let second = store.append_event(&ev(b)).expect("append").id;
 
@@ -1226,5 +1234,92 @@ mod tests {
         let err = store.app_config("web").expect_err("port 0 is rejected");
         assert!(err.to_string().contains("port 0"), "{err}");
         assert!(err.to_string().contains("not a valid port"), "{err}");
+    }
+
+    #[test]
+    fn a_deploy_level_event_round_trips_through_the_stage_column() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .append_event(&Event::finished(
+                id,
+                DeployStatus::RolledBack,
+                Some("apply broke".into()),
+            ))
+            .expect("append");
+
+        let events = store.events_for(id).expect("read");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event.kind,
+            EventKind::Finished {
+                status: DeployStatus::RolledBack
+            }
+        );
+        assert_eq!(events[0].event.detail.as_deref(), Some("apply broke"));
+    }
+
+    /// The literal that separates the two kinds is a storage detail, but a
+    /// wrong one is silent: a stage named "deploy" would read back as a
+    /// terminal event. Pin the spelling.
+    #[test]
+    fn a_deploy_level_event_is_stored_under_the_literal_deploy() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .append_event(&Event::finished(id, DeployStatus::Done, None))
+            .expect("append");
+
+        let conn = store.conn.lock().expect("store lock");
+        let stage: String = conn
+            .query_row(
+                "SELECT stage FROM events WHERE deploy_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(stage, "deploy");
+    }
+
+    /// `in_progress` is a `DeployStatus` but not a terminal one. A row saying
+    /// the deploy finished in progress is corrupt, and must not read back as
+    /// a valid event.
+    #[test]
+    fn a_deploy_level_row_that_is_not_terminal_is_an_error() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        {
+            let conn = store.conn.lock().expect("store lock");
+            conn.execute(
+                "INSERT INTO events (deploy_id, stage, status) VALUES (?1, 'deploy', 'in_progress')",
+                params![id],
+            )
+            .expect("insert");
+        }
+        let err = store.events_for(id).unwrap_err();
+        assert!(err.to_string().contains("not terminal"), "was: {err}");
+    }
+
+    #[test]
+    fn a_stage_event_still_round_trips_unchanged() {
+        let (_dir, store) = open_temp();
+        let id = store.create_deploy("web").expect("create");
+        store
+            .append_event(&Event::for_stage(
+                id,
+                Stage::Build,
+                EventStatus::Failed,
+                None,
+            ))
+            .expect("append");
+
+        let events = store.events_for(id).expect("read");
+        assert_eq!(
+            events[0].event.kind,
+            EventKind::Stage {
+                stage: Stage::Build,
+                status: EventStatus::Failed
+            }
+        );
     }
 }

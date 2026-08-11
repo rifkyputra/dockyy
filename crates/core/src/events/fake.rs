@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use crate::deploy::Stage;
-use crate::events::{EventSink, EventStatus, StoredEvent};
+use crate::deploy::{DeployStatus, Stage};
+use crate::events::{EventKind, EventSink, EventStatus, StoredEvent};
 
 /// Records every emitted event so tests can assert on the timeline.
 #[derive(Default)]
@@ -19,13 +19,25 @@ impl FakeSink {
         self.events.lock().expect("sink lock").clone()
     }
 
-    /// `(stage, status)` pairs in order — the shape most deploy tests assert
-    /// on, where the ids and details are noise.
+    /// `(stage, status)` pairs in order, deploy-level events excluded — the
+    /// shape most deploy tests assert on, where the ids and details are noise.
+    /// The terminal event is asserted separately, via `terminal()`.
     pub fn timeline(&self) -> Vec<(Stage, EventStatus)> {
         self.events()
             .iter()
-            .map(|e| (e.event.stage, e.event.status))
+            .filter_map(|e| match e.event.kind {
+                EventKind::Stage { stage, status } => Some((stage, status)),
+                EventKind::Finished { .. } => None,
+            })
             .collect()
+    }
+
+    /// The terminal status this deploy reported, if it has reported one.
+    pub fn terminal(&self) -> Option<DeployStatus> {
+        self.events().iter().find_map(|e| match e.event.kind {
+            EventKind::Finished { status } => Some(status),
+            EventKind::Stage { .. } => None,
+        })
     }
 }
 

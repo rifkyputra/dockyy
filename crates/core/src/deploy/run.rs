@@ -205,12 +205,7 @@ fn emit(
     status: EventStatus,
     detail: Option<String>,
 ) -> Result<()> {
-    let event = Event {
-        deploy_id,
-        stage,
-        status,
-        detail,
-    };
+    let event = Event::for_stage(deploy_id, stage, status, detail);
     let stored = ctx.store.append_event(&event)?;
     ctx.sink.emit(&stored);
     Ok(())
@@ -299,7 +294,7 @@ mod tests {
     use super::*;
     use crate::events::fake::FakeSink;
     use crate::events::null::NullSink;
-    use crate::events::{EventSink, StoredEvent};
+    use crate::events::{EventKind, EventSink, StoredEvent};
     use crate::exec::fake::FakeExecutor;
     use crate::exec::CommandOutput;
     use crate::fs::fake::FakeFileSystem;
@@ -854,8 +849,13 @@ mod tests {
         );
 
         let last = sink.events().last().cloned().expect("at least one event");
-        assert_eq!(last.event.stage, Stage::Apply);
-        assert_eq!(last.event.status, EventStatus::Failed);
+        assert_eq!(
+            last.event.kind,
+            EventKind::Stage {
+                stage: Stage::Apply,
+                status: EventStatus::Failed
+            }
+        );
         assert!(
             last.event.detail.is_some(),
             "a Failed event must carry its cause"
