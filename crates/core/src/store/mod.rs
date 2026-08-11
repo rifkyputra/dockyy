@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::deploy::{DeployStatus, Stage};
 use crate::events::{Event, EventStatus, StoredEvent};
@@ -74,7 +75,18 @@ pub struct DeployRow {
 /// registration exists from the moment someone adds the app; a deployed spec
 /// only exists after a deploy succeeds. Keeping them apart is what lets an app
 /// be registered before it has ever been built.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **Authority rule:** `app_config` is the operator's intent and is
+/// authoritative for `repo_path` and `route`; `apps` is the deploy record and
+/// is authoritative for `image` and the resolved spec. When an `app_config`
+/// row exists, a deploy must assign `spec.route = config.route`
+/// unconditionally — including `None` — rather than routing it through
+/// `resolve_spec`'s `route_override` parameter, where `None` means "no
+/// override" (keep whatever the repo or stored spec already carries) rather
+/// than "no route". Passing `config.route` as that override would make
+/// clearing a route in the UI silently ineffective: the next deploy would
+/// re-apply the old route from the stored spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub name: String,
     pub repo_path: String,
@@ -304,12 +316,66 @@ impl Store {
     /// columns when the route is `None`. Writing only the non-null values
     /// would make clearing a route impossible — the app would keep serving on
     /// a domain the operator had just removed.
+    ///
+    /// Rejects a `name` that would clobber another app's units: an empty
+    /// slug, or a slug that collides with a *different* existing name in
+    /// either `app_config` or `apps`. The slug is the filesystem/systemd
+    /// identity — it derives the Quadlet unit filename, the container name,
+    /// and the image tag — so a collision here means the second app's deploy
+    /// overwrites the first app's unit before `put_spec`'s own collision
+    /// guard ever runs. Also rejects a relative `repo_path`: the daemon's
+    /// working directory is not the operator's shell, so a relative path
+    /// would resolve against the wrong place.
     pub fn register_app(&self, config: &AppConfig) -> Result<()> {
+        let slug = crate::spec::slug(&config.name);
+        if slug.is_empty() {
+            bail!(
+                "app name {:?} yields an empty identifier; it needs at least one \
+                 letter or digit",
+                config.name
+            );
+        }
+        if !Path::new(&config.repo_path).is_absolute() {
+            bail!(
+                "repo_path {:?} for app {:?} is not absolute; the daemon's working \
+                 directory is not the operator's shell, so a relative path resolves \
+                 against the wrong place",
+                config.repo_path,
+                config.name
+            );
+        }
+
         let (domain, port) = match &config.route {
             Some(route) => (Some(route.domain.as_str()), Some(route.port as i64)),
             None => (None, None),
         };
         let conn = self.conn.lock().expect("store lock");
+
+        // Collision check across both tables, excluding this app's own
+        // existing row — re-registering the same name must still succeed.
+        let other_names: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM app_config WHERE name != ?1
+                     UNION SELECT name FROM apps WHERE name != ?1",
+                )
+                .context("preparing collision check")?;
+            let rows = stmt
+                .query_map(params![config.name], |row| row.get::<_, String>(0))
+                .context("querying existing names")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("reading existing names")?
+        };
+        if other_names
+            .iter()
+            .any(|name| crate::spec::slug(name) == slug)
+        {
+            bail!(
+                "slug {slug:?} for app {:?} collides with an existing app",
+                config.name
+            );
+        }
+
         conn.execute(
             "INSERT INTO app_config (name, repo_path, route_domain, route_port, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))
@@ -448,10 +514,16 @@ fn build_app_config(
     // row was edited outside kuadrat. Refuse it rather than serve half a route.
     let route = match (domain, port) {
         (Some(domain), Some(port)) => {
-            let port = u16::try_from(port).map_err(|_| {
-                anyhow!("app {name:?} has route port {port}, which is outside 1-65535")
+            let parsed = u16::try_from(port).map_err(|_| {
+                anyhow!("app {name:?} has route port {port}, which is outside 0-65535")
             })?;
-            Some(Route { domain, port })
+            if parsed == 0 {
+                bail!("app {name:?} has route port 0, which is not a valid port to serve on");
+            }
+            Some(Route {
+                domain,
+                port: parsed,
+            })
         }
         (None, None) => None,
         (Some(_), None) => bail!("app {name:?} has a route domain but no port"),
@@ -490,12 +562,12 @@ mod tests {
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master
-                 WHERE type='table' AND name IN ('apps','deploys','locks','events')",
+                 WHERE type='table' AND name IN ('apps','deploys','locks','events','app_config')",
                 [],
                 |row| row.get(0),
             )
             .expect("query");
-        assert_eq!(count, 4, "all four tables should exist");
+        assert_eq!(count, 5, "all five tables should exist");
     }
 
     fn open_temp() -> (tempfile::TempDir, Store) {
@@ -864,6 +936,84 @@ mod tests {
     }
 
     #[test]
+    fn registering_a_name_with_an_empty_slug_is_rejected() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        let err = store
+            .register_app(&cfg("@@@", "/srv/web", None))
+            .expect_err("empty slug is rejected");
+        assert!(err.to_string().contains("empty identifier"), "{err}");
+    }
+
+    #[test]
+    fn registering_a_colliding_slug_is_rejected() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .register_app(&cfg("My App", "/srv/my-app", None))
+            .expect("first registration");
+
+        let err = store
+            .register_app(&cfg("my_app", "/srv/other", None))
+            .expect_err("colliding slug is rejected");
+        assert!(
+            err.to_string().contains("collides with an existing app"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("my-app"), "{err}");
+    }
+
+    /// A slug collision against a CLI-deployed `apps` row must also be
+    /// rejected — registration is not the only writer of the identity space.
+    #[test]
+    fn registering_a_slug_that_collides_with_a_deployed_app_is_rejected() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .put_spec("my-app", "my-app", r#"{"name":"my-app"}"#)
+            .expect("seed deployed app");
+
+        let err = store
+            .register_app(&cfg("My App", "/srv/web", None))
+            .expect_err("colliding slug is rejected");
+        assert!(
+            err.to_string().contains("collides with an existing app"),
+            "{err}"
+        );
+    }
+
+    /// Re-registering the same name must not trip its own collision check.
+    #[test]
+    fn re_registering_the_same_name_still_succeeds() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        store
+            .register_app(&cfg("web", "/srv/web", None))
+            .expect("first registration");
+        store
+            .register_app(&cfg("web", "/srv/web-v2", None))
+            .expect("re-registering the same app should succeed");
+
+        let got = store.app_config("web").expect("read").expect("present");
+        assert_eq!(got.repo_path, "/srv/web-v2");
+    }
+
+    #[test]
+    fn registering_a_relative_repo_path_is_rejected() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+
+        let err = store
+            .register_app(&cfg("web", "myapp", None))
+            .expect_err("relative repo_path is rejected");
+        assert!(err.to_string().contains("not absolute"), "{err}");
+    }
+
+    #[test]
     fn a_route_survives_the_round_trip() {
         let dir = tempdir().unwrap();
         let store = Store::open(&dir.path().join("k.db")).unwrap();
@@ -1050,5 +1200,31 @@ mod tests {
         let all = store.list_app_configs().expect("list");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].route.as_ref().expect("route").domain, "example.com");
+    }
+
+    /// Port 0 cannot reach `register_app` through the `Route`/`u16` type
+    /// today, but a hand-edited row could carry it — reading it back must
+    /// refuse it rather than construct a `Route` nothing can serve on.
+    #[test]
+    fn reading_a_route_with_port_zero_is_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("k.db");
+        let store = Store::open(&path).expect("open");
+        store
+            .register_app(&cfg("web", "/srv/web", None))
+            .expect("register");
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE app_config SET route_domain = 'example.com', route_port = 0
+                 WHERE name = 'web'",
+                [],
+            )
+            .expect("seed invalid port");
+        }
+
+        let err = store.app_config("web").expect_err("port 0 is rejected");
+        assert!(err.to_string().contains("port 0"), "{err}");
+        assert!(err.to_string().contains("not a valid port"), "{err}");
     }
 }
