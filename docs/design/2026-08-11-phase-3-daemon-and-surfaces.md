@@ -86,10 +86,11 @@ An id only exists after the insert, so a type that carries one cannot be built b
 persist-before-publish becomes a property of the types rather than a rule to remember.
 
 `Ctx` gains a fifth field, `sink`, alongside `exec`, `fsys`, `store`, and `paths`. `deploy::run`
-calls `ctx.sink.emit(&event)` immediately after each
-existing `append_event`. **Persist first, then publish**: the durable record is what the API serves
-on reconnect, so it must never lag the stream. This ordering is load-bearing, not stylistic — the
-lag-recovery path in the SSE handler depends on it.
+funnels every transition through one helper that calls `store.append_event(&event)?` and publishes
+the `StoredEvent` it returns. **Persist first, then publish**: the durable record is what the API
+serves on reconnect, so it must never lag the stream. This ordering is load-bearing, not stylistic
+— the lag-recovery path in the SSE handler depends on it, and the `?` means a failed insert
+publishes nothing.
 
 Three implementations:
 
@@ -105,10 +106,12 @@ dependency and no `host` parameter.
 
 ### What changes in `core`
 
-- `events`: `StoredEvent { id, event }`, the `EventSink` trait, `NullSink`, `FakeSink`.
-  `store::append_event` returns the assigned id and `events_for` returns `StoredEvent`. **The column
-  already exists** (`events.id INTEGER PRIMARY KEY AUTOINCREMENT`) — this is an API exposure change,
-  not a schema change.
+- `events`: `StoredEvent { id, at, event }`, the `EventSink` trait, `NullSink`, `FakeSink`.
+  `store::append_event` returns `Result<StoredEvent>` — `INSERT … RETURNING id, at`, so the
+  id and the insert timestamp come back from the same statement — and `events_for` returns
+  `Vec<StoredEvent>`. **Both columns already exist** (`events.id INTEGER PRIMARY KEY AUTOINCREMENT`,
+  `events.at TEXT NOT NULL DEFAULT (datetime('now'))`) — this is an API exposure change, not a
+  schema change.
 - `store`: `apps` gains `repo_path TEXT` and `route TEXT`, both nullable, with
   `register_app`/`app_row` accessors. See Migration below.
 - `logs`: a new module, `tail(exec, unit, n)` and `search(exec, unit, pattern)` over the existing
