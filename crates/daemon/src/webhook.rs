@@ -84,14 +84,38 @@ pub fn payload(app: &str, ev: &StoredEvent) -> String {
 
 /// Escape a value for a `curl --config` document: `\` first, then `"`, so a
 /// literal backslash isn't mistaken for the escape it introduces on the next
-/// pass.
+/// pass. Also escapes every control character (`< 0x20`, plus `0x7f`) as a
+/// `\xHH` sequence — curl's config parser is line-oriented, so a raw
+/// character in that range (a newline above all) would corrupt the document
+/// structurally, not just the value. This does not depend on what a caller
+/// happens to have already escaped: it is the whole guarantee, not half of
+/// it shared with `payload`.
 fn escape_config_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A `curl --config` document that carries the URL and the JSON body without
 /// putting either on the command line — argv is world-readable through `ps`,
 /// and a webhook URL carries its token in its path.
+///
+/// The format is line-oriented: each directive is its own line, and a value
+/// runs to the closing quote curl finds on that same line. A raw newline
+/// inside a value would therefore not stay inside the value — it would end
+/// the `data =` line early and hand curl a fresh line to interpret as its
+/// *next* option (an `output = /path` embedded in event detail text is not
+/// hypothetical: deploy details carry raw command stderr). `escape_config_value`
+/// closes that off by escaping every control character, not only `\` and `"`.
 pub fn curl_config(url: &str, body: &str) -> String {
     format!(
         "url = \"{}\"\nheader = \"Content-Type: application/json\"\ndata = \"{}\"\n",
@@ -187,24 +211,31 @@ mod tests {
 
     /// A quote or a backslash in the body must not end the config value early
     /// — that would truncate the request or, worse, let a log line inject a
-    /// curl option.
+    /// curl option. Uses a fixture with no pre-escaped sequences, so this
+    /// only passes if `escape_config_value` actually did the work: a bare `"`
+    /// and a bare `\` must come out as `\"` and `\\`.
     #[test]
     fn a_body_containing_quotes_and_backslashes_is_escaped() {
-        let cfg = curl_config("https://example.com/h", r#"{"detail":"say \"hi\" C:\\x"}"#);
-        for line in cfg.lines() {
-            if let Some(rest) = line.strip_prefix("data = ") {
-                assert!(
-                    rest.starts_with('"') && rest.ends_with('"'),
-                    "unquoted: {rest}"
-                );
-                // Every interior quote must be escaped.
-                let inner = &rest[1..rest.len() - 1];
-                assert!(
-                    !inner.contains(r#"""#) || inner.contains(r#"\""#),
-                    "an unescaped quote ends the value early: {inner}"
-                );
-            }
-        }
+        let cfg = curl_config("https://example.com/h", r#"say "hi" C:\x"#);
+        let data_line = cfg
+            .lines()
+            .find_map(|l| l.strip_prefix("data = "))
+            .expect("a data line");
+        assert_eq!(data_line, r#""say \"hi\" C:\\x""#);
+    }
+
+    /// A raw newline in a config value ends the line, and the next line
+    /// becomes a curl *option*. Event details carry `format!("{err:#}")` of a
+    /// stage failure, which embeds raw command stderr, so this input is
+    /// genuinely untrusted — an application that logs a line looking like a
+    /// curl option must not become one.
+    #[test]
+    fn a_newline_in_a_value_cannot_start_a_new_config_line() {
+        let cfg = curl_config("https://example.com/h", "line one\noutput = /etc/passwd");
+        assert!(
+            !cfg.lines().any(|l| l.trim_start().starts_with("output")),
+            "a value's newline started a new option line:\n{cfg}"
+        );
     }
 
     #[test]
