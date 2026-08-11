@@ -82,23 +82,31 @@ pub fn payload(app: &str, ev: &StoredEvent) -> String {
     .to_string()
 }
 
-/// Escape a value for a `curl --config` document: `\` first, then `"`, so a
-/// literal backslash isn't mistaken for the escape it introduces on the next
-/// pass. Also escapes every control character (`< 0x20`, plus `0x7f`) as a
-/// `\xHH` sequence — curl's config parser is line-oriented, so a raw
-/// character in that range (a newline above all) would corrupt the document
-/// structurally, not just the value. This does not depend on what a caller
-/// happens to have already escaped: it is the whole guarantee, not half of
-/// it shared with `payload`.
+/// Escape a value for a `curl --config` document.
+///
+/// `\` first, then `"`, so a literal backslash isn't mistaken for the escape
+/// it introduces on the next pass. Per `curl`'s own manual (the `--config`
+/// section): inside double quotes it understands exactly six escapes — `\\`,
+/// `\"`, `\t`, `\n`, `\r`, `\v` — and **"a backslash preceding any other
+/// letter is ignored."** That rules out inventing a `\xHH` form: `\x0a` would
+/// not restore the byte, it would arrive as the two literal characters `x0a`,
+/// silently wrong rather than visibly rejected. So the four control
+/// characters curl names get curl's own spelling, and every other control
+/// character (`< 0x20` minus those four, plus `0x7f`) — which curl has no
+/// escape for at all — becomes a literal space. A space cannot end the value
+/// early (the one property this function exists to guarantee) and cannot be
+/// mistaken for content the way `x0a` could.
 fn escape_config_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
-                out.push_str(&format!("\\x{:02x}", c as u32))
-            }
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\x0b' => out.push_str("\\v"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => out.push(' '),
             c => out.push(c),
         }
     }
@@ -115,7 +123,9 @@ fn escape_config_value(value: &str) -> String {
 /// the `data =` line early and hand curl a fresh line to interpret as its
 /// *next* option (an `output = /path` embedded in event detail text is not
 /// hypothetical: deploy details carry raw command stderr). `escape_config_value`
-/// closes that off by escaping every control character, not only `\` and `"`.
+/// closes that off using curl's own escape set (`\n`, `\r`, `\t`, `\v`, plus
+/// `\\` and `\"`) for the characters it understands, and a literal space for
+/// any other control byte, which curl has no escape for.
 pub fn curl_config(url: &str, body: &str) -> String {
     format!(
         "url = \"{}\"\nheader = \"Content-Type: application/json\"\ndata = \"{}\"\n",
@@ -236,6 +246,42 @@ mod tests {
             !cfg.lines().any(|l| l.trim_start().starts_with("output")),
             "a value's newline started a new option line:\n{cfg}"
         );
+    }
+
+    /// curl's config parser understands exactly `\\`, `\"`, `\t`, `\n`, `\r`
+    /// and `\v`; a backslash before anything else is ignored, so an invented
+    /// escape like `\x0a` would arrive as the literal text `x0a`. These four
+    /// must therefore use curl's own spellings, not ours.
+    #[test]
+    fn the_four_control_characters_curl_understands_use_its_own_escapes() {
+        let cfg = curl_config("https://example.com/h", "a\nb\tc\rd\x0be");
+        let data = cfg
+            .lines()
+            .find(|l| l.starts_with("data = "))
+            .expect("data line");
+        assert!(data.contains(r"\n"), "{data}");
+        assert!(data.contains(r"\t"), "{data}");
+        assert!(data.contains(r"\r"), "{data}");
+        assert!(data.contains(r"\v"), "{data}");
+        assert!(
+            !data.contains(r"\x"),
+            "an escape curl does not understand: {data}"
+        );
+    }
+
+    /// curl has no escape at all for a control character outside its set of
+    /// six, so one that arrives (`\x00`, `\x1f`, `0x7f`) is replaced with a
+    /// literal space: it keeps the value on one physical line — the safety
+    /// property `curl_config` exists to guarantee — without inventing an
+    /// escape curl would silently misread.
+    #[test]
+    fn other_control_characters_become_a_space() {
+        let cfg = curl_config("https://example.com/h", "a\x00b\x1fc\x7fd");
+        let data_line = cfg
+            .lines()
+            .find_map(|l| l.strip_prefix("data = "))
+            .expect("a data line");
+        assert_eq!(data_line, r#""a b c d""#);
     }
 
     #[test]
