@@ -22,13 +22,23 @@ use crate::workloads::apply::{apply, remove};
 /// begin (invalid spec, or another deploy already holds the lock).
 pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<DeployOutcome> {
     spec.validate()?;
-    let name = spec.name.clone();
-    let slug = spec.slug();
+    let deploy_id = reserve(ctx, &spec.name)?;
+    run_reserved(ctx, spec, repo, deploy_id).await
+}
 
-    let previous = load_previous(ctx, &name)?;
-
-    let deploy_id = ctx.store.create_deploy(&name)?;
-    if !ctx.store.acquire_lock(&name, deploy_id)? {
+/// Allocate a deploy row for `name` and take its lock, without running anything.
+///
+/// Split out of [`run`] for a caller that must answer "accepted, id N" before
+/// the deploy starts — the daemon, which queues deploys behind a global
+/// one-at-a-time semaphore and needs an addressable id for the page it
+/// redirects to. The row is `in_progress` from this moment, so a crash while
+/// queued leaves exactly what a crash mid-deploy leaves, and `reconcile` rolls
+/// it back on the next start.
+///
+/// Errors when another deploy of the same app already holds the lock.
+pub fn reserve(ctx: &Ctx<'_>, name: &str) -> Result<i64> {
+    let deploy_id = ctx.store.create_deploy(name)?;
+    if !ctx.store.acquire_lock(name, deploy_id)? {
         ctx.store.finish_deploy(
             deploy_id,
             DeployStatus::Failed,
@@ -36,6 +46,21 @@ pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<Deplo
         )?;
         bail!("another deploy of {name} is already in progress");
     }
+    Ok(deploy_id)
+}
+
+/// Run the stages for a deploy already reserved by [`reserve`], releasing the
+/// lock however it ends. The caller owns the id; this owns everything after it.
+pub async fn run_reserved(
+    ctx: &Ctx<'_>,
+    spec: WorkloadSpec,
+    repo: &Path,
+    deploy_id: i64,
+) -> Result<DeployOutcome> {
+    spec.validate()?;
+    let name = spec.name.clone();
+    let slug = spec.slug();
+    let previous = load_previous(ctx, &name)?;
 
     // Everything past the lock must release it, whatever happens.
     let result = run_stages(ctx, spec, repo, &slug, deploy_id, &previous).await;

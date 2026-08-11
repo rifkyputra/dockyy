@@ -115,7 +115,9 @@ pub mod health;
 mod run;
 
 pub use run::reconcile;
+pub use run::reserve;
 pub use run::run;
+pub use run::run_reserved;
 
 #[cfg(test)]
 mod tests {
