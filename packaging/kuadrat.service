@@ -1,0 +1,22 @@
+[Unit]
+Description=kuadrat deploy daemon
+Documentation=https://github.com/…/kuadrat
+After=network.target podman.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kuadrat serve --listen 127.0.0.1:7457
+Restart=on-failure
+RestartSec=2
+
+# Deliberately minimal. This service writes Quadlet units into
+# /etc/containers/systemd, runs podman, and calls systemctl daemon-reload;
+# most of what a hardening template switches on breaks at least one of the
+# three. These two are compatible with all of them, and the acceptance script
+# completes a real deploy with this file as shipped — a hardening directive
+# that was never run is an assumption, not a protection.
+NoNewPrivileges=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
