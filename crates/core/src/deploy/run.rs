@@ -421,6 +421,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_rollback_reports_failed_not_rolled_back() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+        let exec = FakeExecutor::new();
+        // Apply's start fails...
+        script_clean(&exec, "abc123", "web", out(1, "", "boom"));
+        // ...and compensation's remove (stop) ALSO fails.
+        exec.expect_call(
+            "systemctl",
+            &["stop", "kuadrat-web"],
+            out(1, "", "stop refused"),
+        );
+
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+        };
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("terminal outcome");
+
+        match outcome {
+            DeployOutcome::Failed { failed_at, cause } => {
+                assert_eq!(failed_at, Stage::Apply);
+                assert!(cause.contains("compensation also failed"), "cause: {cause}");
+            }
+            other => {
+                panic!("expected Failed (not RolledBack) when compensation fails, got {other:?}")
+            }
+        }
+        // Even here the lock is released.
+        assert!(store.acquire_lock("web", 999).unwrap());
+    }
+
+    #[tokio::test]
     async fn a_concurrent_deploy_is_rejected_while_the_lock_is_held() {
         let dir = tempdir().unwrap();
         let store = Store::open(&dir.path().join("k.db")).unwrap();
