@@ -11,7 +11,7 @@ use crate::deploy::build::build;
 use crate::deploy::detect::detect;
 use crate::deploy::health::healthcheck;
 use crate::deploy::{Ctx, DeployOutcome, DeployStatus, Stage};
-use crate::events::{Event, EventStatus};
+use crate::events::{Event, EventStatus, StoredEvent};
 use crate::gateway::{apply_route, remove_route};
 use crate::secrets::ensure_all;
 use crate::spec::{slug, WorkloadSpec};
@@ -159,23 +159,35 @@ async fn run_stages(
 /// Advance the durable stage and emit a Started event.
 fn begin(ctx: &Ctx<'_>, deploy_id: i64, stage: Stage) -> Result<()> {
     ctx.store.advance_stage(deploy_id, stage)?;
-    ctx.store.append_event(&Event {
-        deploy_id,
-        stage,
-        status: EventStatus::Started,
-        detail: None,
-    })?;
-    Ok(())
+    emit(ctx, deploy_id, stage, EventStatus::Started, None)
 }
 
 /// Emit a Succeeded event for a stage.
 fn ok(ctx: &Ctx<'_>, deploy_id: i64, stage: Stage) -> Result<()> {
-    ctx.store.append_event(&Event {
+    emit(ctx, deploy_id, stage, EventStatus::Succeeded, None)
+}
+
+/// Persist one event, then publish it to the sink.
+///
+/// The order is load-bearing: the store is what a reconnecting subscriber
+/// reads for the backlog, so an event must be durable before anyone can see
+/// it. Publishing first would let a browser render a stage that a crash then
+/// erases.
+fn emit(
+    ctx: &Ctx<'_>,
+    deploy_id: i64,
+    stage: Stage,
+    status: EventStatus,
+    detail: Option<String>,
+) -> Result<()> {
+    let event = Event {
         deploy_id,
         stage,
-        status: EventStatus::Succeeded,
-        detail: None,
-    })?;
+        status,
+        detail,
+    };
+    let id = ctx.store.append_event(&event)?;
+    ctx.sink.emit(&StoredEvent { id, event });
     Ok(())
 }
 
@@ -191,12 +203,13 @@ async fn fail(
     err: anyhow::Error,
 ) -> Result<DeployOutcome> {
     let cause = format!("{err:#}");
-    ctx.store.append_event(&Event {
+    emit(
+        ctx,
         deploy_id,
         stage,
-        status: EventStatus::Failed,
-        detail: Some(cause.clone()),
-    })?;
+        EventStatus::Failed,
+        Some(cause.clone()),
+    )?;
 
     match compensate(ctx, &spec.name, slug, previous, stage).await {
         Ok(()) => {
@@ -259,6 +272,9 @@ async fn unwind_route(ctx: &Ctx<'_>, slug: &str, previous: &Option<WorkloadSpec>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::fake::FakeSink;
+    use crate::events::null::NullSink;
+    use crate::events::EventSink;
     use crate::exec::fake::FakeExecutor;
     use crate::exec::CommandOutput;
     use crate::fs::fake::FakeFileSystem;
@@ -320,6 +336,63 @@ mod tests {
         fsys
     }
 
+    /// Owns the fakes so a `Ctx` can borrow them, and keeps the `TempDir`
+    /// alive — dropping it would delete the database mid-test.
+    struct Harness {
+        exec: FakeExecutor,
+        fsys: FakeFileSystem,
+        store: Store,
+        paths: Paths,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        /// `start_result` is what `systemctl start` returns, which is the knob
+        /// that decides whether Apply succeeds.
+        fn new(start_result: CommandOutput) -> Self {
+            let dir = tempdir().unwrap();
+            let store = Store::open(&dir.path().join("k.db")).unwrap();
+            let paths = Paths::rooted(dir.path());
+            let fsys = fsys_with_repo();
+            let exec = FakeExecutor::new();
+            script_clean(&exec, "abc123", "web", start_result);
+            Self {
+                exec,
+                fsys,
+                store,
+                paths,
+                _dir: dir,
+            }
+        }
+
+        fn ctx<'a>(&'a self, sink: &'a dyn EventSink) -> Ctx<'a> {
+            Ctx {
+                exec: &self.exec,
+                fsys: &self.fsys,
+                store: &self.store,
+                paths: &self.paths,
+                sink,
+            }
+        }
+    }
+
+    /// Every stage succeeds; the deploy reaches Done.
+    fn harness_ok() -> Harness {
+        Harness::new(out(0, "", ""))
+    }
+
+    /// `systemctl start` fails, so Apply fails and compensation removes the
+    /// unit — the same sequence
+    /// `a_first_deploy_failing_at_apply_rolls_back_by_removing_the_unit`
+    /// already proves. The second `daemon-reload` that `remove` runs is
+    /// already scripted by `script_clean`.
+    fn harness_apply_fails() -> Harness {
+        let h = Harness::new(out(1, "", "boom"));
+        h.exec
+            .expect_call("systemctl", &["stop", "kuadrat-web"], out(0, "", ""));
+        h
+    }
+
     #[tokio::test]
     async fn a_clean_deploy_runs_every_stage_and_returns_done() {
         let dir = tempdir().unwrap();
@@ -334,6 +407,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcome = run(
             &ctx,
@@ -373,6 +447,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcome = run(
             &ctx,
@@ -447,6 +522,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcome = run(
             &ctx,
@@ -485,6 +561,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcome = run(
             &ctx,
@@ -519,6 +596,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         assert!(reconcile(&ctx).await.unwrap().is_empty());
     }
@@ -540,6 +618,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcomes = reconcile(&ctx).await.unwrap();
 
@@ -584,6 +663,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcomes = reconcile(&ctx).await.unwrap();
 
@@ -620,6 +700,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let outcomes = reconcile(&ctx).await.unwrap();
 
@@ -645,6 +726,7 @@ mod tests {
             fsys: &fsys,
             store: &store,
             paths: &paths,
+            sink: &NullSink,
         };
         let err = run(
             &ctx,
@@ -657,5 +739,138 @@ mod tests {
             err.to_string().contains("already in progress"),
             "message: {err}"
         );
+    }
+
+    /// A deploy that reaches Done must have emitted Started and Succeeded for
+    /// all six stages, in order. This is what the browser renders.
+    #[tokio::test]
+    async fn a_successful_deploy_emits_every_stage_in_order() {
+        let h = harness_ok();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("run");
+        assert!(matches!(outcome, DeployOutcome::Done { .. }), "{outcome:?}");
+
+        use EventStatus::{Started, Succeeded};
+        assert_eq!(
+            sink.timeline(),
+            vec![
+                (Stage::Detect, Started),
+                (Stage::Detect, Succeeded),
+                (Stage::Build, Started),
+                (Stage::Build, Succeeded),
+                (Stage::Secrets, Started),
+                (Stage::Secrets, Succeeded),
+                (Stage::Apply, Started),
+                (Stage::Apply, Succeeded),
+                (Stage::Route, Started),
+                (Stage::Route, Succeeded),
+                (Stage::Healthcheck, Started),
+                (Stage::Healthcheck, Succeeded),
+            ]
+        );
+    }
+
+    /// Every emitted event must carry the id the store assigned it, and the
+    /// ids must ascend. A subscriber filters on `id > last_seen`; a zero or a
+    /// repeat would silently drop events.
+    #[tokio::test]
+    async fn emitted_events_carry_ascending_store_ids() {
+        let h = harness_ok();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+
+        run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("run");
+
+        let ids: Vec<i64> = sink.events().iter().map(|e| e.id).collect();
+        assert!(!ids.is_empty(), "no events emitted");
+        assert!(
+            ids.iter().all(|&i| i > 0),
+            "ids must be real rowids: {ids:?}"
+        );
+        assert!(
+            ids.windows(2).all(|w| w[1] > w[0]),
+            "ids must ascend: {ids:?}"
+        );
+    }
+
+    /// The last thing a watcher sees before a rollback is the Failed event for
+    /// the stage that broke — that is what the UI highlights and what the
+    /// webhook forwards.
+    #[tokio::test]
+    async fn a_failed_stage_emits_a_failed_event_naming_that_stage() {
+        let h = harness_apply_fails();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+
+        let outcome = run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("terminal outcome");
+        assert!(
+            matches!(outcome, DeployOutcome::RolledBack { .. }),
+            "{outcome:?}"
+        );
+
+        let last = sink.events().last().cloned().expect("at least one event");
+        assert_eq!(last.event.stage, Stage::Apply);
+        assert_eq!(last.event.status, EventStatus::Failed);
+        assert!(
+            last.event.detail.is_some(),
+            "a Failed event must carry its cause"
+        );
+    }
+
+    /// Persist-before-publish: everything the sink saw is also in the store,
+    /// with the same ids. A reconnecting browser reads the store for the
+    /// backlog, so a gap here is an event the user can never recover.
+    #[tokio::test]
+    async fn every_emitted_event_is_also_durable_with_the_same_id() {
+        let h = harness_ok();
+        let sink = FakeSink::new();
+        let ctx = h.ctx(&sink);
+
+        run(
+            &ctx,
+            WorkloadSpec::new("web", "placeholder"),
+            Path::new("/repo"),
+        )
+        .await
+        .expect("run");
+
+        let emitted: Vec<i64> = sink.events().iter().map(|e| e.id).collect();
+        let deploy_id = emitted_deploy_id(&sink);
+        let stored: Vec<i64> = ctx
+            .store
+            .events_for(deploy_id)
+            .expect("read")
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(emitted, stored);
+    }
+
+    fn emitted_deploy_id(sink: &FakeSink) -> i64 {
+        sink.events()
+            .first()
+            .expect("at least one event")
+            .event
+            .deploy_id
     }
 }

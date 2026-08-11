@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use kuadrat_core::events::null::NullSink;
 use kuadrat_core::exec::local::LocalExecutor;
 use kuadrat_core::fs::local::LocalFileSystem;
 use kuadrat_core::spec::WorkloadSpec;
@@ -132,6 +133,7 @@ async fn main() -> Result<()> {
                 fsys: &fsys,
                 store: &store,
                 paths: &paths,
+                sink: &NullSink,
             };
             let outcome = run(&ctx, spec, &path).await?;
             println!("{outcome:?}");
@@ -174,6 +176,7 @@ async fn main() -> Result<()> {
                 fsys: &fsys,
                 store: &store,
                 paths: &paths,
+                sink: &NullSink,
             };
             let outcomes = reconcile(&ctx).await?;
             if outcomes.is_empty() {

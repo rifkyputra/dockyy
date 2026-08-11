@@ -71,6 +71,7 @@ impl DeployStatus {
     }
 }
 
+use crate::events::EventSink;
 use crate::exec::Executor;
 use crate::fs::FileSystem;
 use crate::store::Store;
@@ -96,11 +97,16 @@ pub enum DeployOutcome {
 }
 
 /// Everything a deploy stage needs, bundled so stages take one argument.
+///
+/// The three seams — `exec` for processes, `fsys` for storage, `sink` for
+/// publishing — plus the store, which is kuadrat's own state rather than a
+/// side effect on the host (see ADR-0002).
 pub struct Ctx<'a> {
     pub exec: &'a dyn Executor,
     pub fsys: &'a dyn FileSystem,
     pub store: &'a Store,
     pub paths: &'a Paths,
+    pub sink: &'a dyn EventSink,
 }
 
 pub mod build;
