@@ -12,9 +12,13 @@
 //! reversed one. A second copy of that would be a second place for it to rot
 //! silently.
 
+use std::pin::Pin;
+use std::time::Duration;
+
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use futures_core::Stream;
 use kuadrat_core::deploy::DeployStatus;
 use kuadrat_core::events::{EventKind, StoredEvent};
 use tokio::sync::broadcast::error::RecvError;
@@ -194,6 +198,80 @@ where
     Ok(Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+/// One followed journal as an SSE response, rendered by `render`.
+///
+/// A **second, simpler engine** than [`events_sse`], not a reuse of it: log
+/// lines have no store ids, so there is nothing to deduplicate, nothing to
+/// resume from, and nothing to re-read after a lag. Reusing `events_sse`
+/// would mean inventing ids to drive machinery protecting a property log
+/// lines do not have. It shares `events_sse`'s *shape* — a renderer
+/// parameter, and the payload sanitised in the engine so no renderer can
+/// produce a `data` field that `sse::Event::data` rejects.
+///
+/// `deadline` exists for the half-dead connection the server never notices
+/// dropping: when it elapses the stream simply ends, which closes the
+/// connection normally rather than hanging it open forever. `EventSource`
+/// reconnects on its own, so a viewer sees a gap of a second rather than an
+/// ended stream.
+pub fn lines_sse<F>(
+    mut source: Box<dyn Stream<Item = anyhow::Result<String>> + Send + Unpin>,
+    render: F,
+    deadline: Duration,
+) -> Response
+where
+    F: Fn(&str) -> String + Send + 'static,
+{
+    let stream = async_stream::stream! {
+        let sleep = tokio::time::sleep(deadline);
+        tokio::pin!(sleep);
+
+        loop {
+            tokio::select! {
+                // The ceiling elapsing is not an error — it is the normal,
+                // expected end of a long-lived connection.
+                _ = &mut sleep => return,
+                item = next(&mut source) => {
+                    match item {
+                        Some(Ok(line)) => {
+                            yield Ok::<_, std::convert::Infallible>(to_line_event(render(&line)));
+                        }
+                        // An unreadable journal mid-stream, or the source
+                        // ending on its own (journalctl -f does not, in
+                        // practice, but the type allows it): either way,
+                        // closing is the honest answer.
+                        Some(Err(_)) | None => return,
+                    }
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Pull one item from a `Send + Unpin` stream without an extension trait.
+///
+/// `futures_core::Stream` (the trait `lines_sse` is written against, per the
+/// crate's existing direct dependency) exposes only `poll_next` — the
+/// combinators on `StreamExt` live in a crate this daemon does not depend on.
+/// `std::future::poll_fn` is the standard-library bridge from that raw poll
+/// method to a plain `.await`-able future.
+async fn next<S>(source: &mut S) -> Option<S::Item>
+where
+    S: Stream + Unpin + ?Sized,
+{
+    std::future::poll_fn(|cx| Pin::new(&mut *source).poll_next(cx)).await
+}
+
+/// Build the wire `sse::Event` for one journal line. No id: a log line has no
+/// store-assigned identity for a client to resume from, unlike a stored
+/// event.
+fn to_line_event(data: String) -> sse::Event {
+    sse::Event::default().data(data.replace(['\r', '\n'], " "))
 }
 
 fn is_finished(ev: &StoredEvent) -> bool {

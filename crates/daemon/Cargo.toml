@@ -30,3 +30,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # raw-connection trick to simulate a broken schema) — reused here to break the
 # store out from under a live `Store`, not a new crate in the dependency tree.
 rusqlite.workspace = true
+# Already in the tree via kuadrat-core, which depends on it directly — this is
+# a dependency edge for the deadline test's `tokio_stream::pending`, not a new
+# crate. Production code names the trait as `futures_core::Stream` instead.
+tokio-stream.workspace = true

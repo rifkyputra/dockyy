@@ -8,16 +8,17 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
 use kuadrat_core::events::StoredEvent;
-use kuadrat_core::logs::tail;
+use kuadrat_core::logs::{follow, tail};
 use kuadrat_core::spec::Route;
 use kuadrat_core::store::AppConfig;
 use kuadrat_core::workloads::query::status;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::error::{ApiError, ApiResult};
 use crate::pages::wants_html;
 use crate::state::{spec_for, AppState};
-use crate::stream::events_sse;
+use crate::stream::{events_sse, lines_sse};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
         .route("/api/apps/:name/logs", get(logs))
+        .route("/api/apps/:name/logs/stream", get(logs_stream))
         .route("/api/deploys/:id", get(get_deploy))
         .route("/api/deploys/:id/events", get(deploy_events))
         .route("/assets/htmx.min.js", get(crate::assets::htmx))
@@ -269,6 +271,34 @@ async fn logs(
     Ok(Json(LogsOut { name, lines }))
 }
 
+/// The backlog `logs::follow` opens a stream with — a page-sized read, same
+/// as the bounded endpoint's default.
+const LOG_STREAM_BACKLOG: usize = 100;
+
+/// How long a connection is held open before the engine ends it on its own.
+/// `EventSource` reconnects on its own, so a viewer sees a gap of a second
+/// rather than an ended stream — this exists only for the half-dead
+/// connection the server never notices dropping.
+const LOG_STREAM_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+/// A workload's journal, followed live: the last `LOG_STREAM_BACKLOG` lines,
+/// then everything that arrives after, one SSE event per line.
+async fn logs_stream(State(st): State<AppState>, Path(name): Path<String>) -> ApiResult<Response> {
+    // 404 before a stream is opened, as `logs` does above.
+    registration(&st, &name)?;
+
+    let stream = follow(&*st.exec, &name, LOG_STREAM_BACKLOG)
+        .await
+        .map_err(|e| ApiError::internal(format!("reading logs for {name}: {e:#}")))?;
+
+    Ok(lines_sse(stream, line_event, LOG_STREAM_DEADLINE))
+}
+
+/// One line on the wire, as JSON.
+fn line_event(line: &str) -> String {
+    serde_json::to_string(&serde_json::json!({ "line": line })).expect("a string serializes")
+}
+
 async fn get_deploy(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -367,6 +397,7 @@ pub(crate) mod tests {
     use kuadrat_core::store::Store;
     use kuadrat_core::workloads::paths::Paths;
     use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -468,6 +499,52 @@ pub(crate) mod tests {
         state.hub = Arc::new(BroadcastSink::with_capacity(256));
         let hub = state.hub.clone();
         (router(state), store, hub, dir)
+    }
+
+    /// A harness whose `FakeExecutor` scripts both the pre-flight `tail`
+    /// (`logs::follow` runs it first, so it must succeed before any stream
+    /// opens) and the streamed lines themselves. Both are keyed on the
+    /// `journalctl` program name but live in separate maps on `FakeExecutor`
+    /// (`expect` vs. `expect_stream`), so scripting one does not clobber the
+    /// other.
+    pub(crate) fn harness_with_journal(
+        lines: Vec<String>,
+    ) -> (Router, Arc<Store>, Arc<BroadcastSink>, TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open(&dir.path().join("k.db")).expect("store"));
+        let exec = FakeExecutor::new();
+        exec.expect("systemctl", ok());
+        exec.expect(
+            "journalctl",
+            CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        exec.expect_stream("journalctl", lines);
+        let mut state = AppState::new(
+            Arc::new(exec),
+            Arc::new(FakeFileSystem::new()),
+            store.clone(),
+            Paths::rooted(dir.path()),
+        );
+        state.hub = Arc::new(BroadcastSink::with_capacity(256));
+        let hub = state.hub.clone();
+        (router(state), store, hub, dir)
+    }
+
+    /// Register an app under `name` with a placeholder repo path. The tests
+    /// exercising `/logs/stream` only care that the app exists, not where its
+    /// repo lives.
+    pub(crate) fn register(store: &Store, name: &str) {
+        store
+            .register_app(&AppConfig {
+                name: name.to_string(),
+                repo_path: format!("/srv/{name}"),
+                route: None,
+            })
+            .expect("register");
     }
 
     pub(crate) fn get(path: &str) -> Request<Body> {
@@ -1395,5 +1472,65 @@ pub(crate) mod tests {
             !body.to_lowercase().contains("no such app"),
             "a store error rendered as the 404 page: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_log_stream_sends_one_event_per_line() {
+        let (app, store, _hub, _d) = harness_with_journal(vec!["one".into(), "two".into()]);
+        register(&store, "web");
+
+        let res = app
+            .oneshot(get("/api/apps/web/logs/stream"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let data = sse_raw_data(res).await;
+        assert_eq!(data.len(), 2);
+        assert!(data[0].contains("one"), "{}", data[0]);
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_app_is_a_404_before_any_stream() {
+        let (app, _store, _hub, _d) = harness_parts();
+        let res = app
+            .oneshot(get("/api/apps/nope/logs/stream"))
+            .await
+            .expect("send");
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A line carrying a carriage return must not panic the stream:
+    /// `sse::Event::data` asserts on `\r`, and journald carries whatever an
+    /// application wrote. This is the same defect H6 shipped and fixed once;
+    /// the sanitising belongs in the engine so a second renderer cannot
+    /// reintroduce it.
+    #[tokio::test]
+    async fn a_line_containing_a_carriage_return_does_not_panic() {
+        let (app, store, _hub, _d) = harness_with_journal(vec!["a\rb".into()]);
+        register(&store, "web");
+
+        let res = app
+            .oneshot(get("/api/apps/web/logs/stream"))
+            .await
+            .expect("send");
+        let data = sse_raw_data(res).await;
+        assert_eq!(data.len(), 1);
+        assert!(!data[0].contains('\r'));
+    }
+
+    /// The ceiling exists for the half-dead connection the server never
+    /// notices dropping. Call the engine directly with a tiny deadline rather
+    /// than waiting thirty minutes; the paused clock keeps it free.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_ends_when_its_deadline_elapses() {
+        // A source that never ends: without the deadline this would hang.
+        let never = Box::new(tokio_stream::pending::<anyhow::Result<String>>());
+        let res = lines_sse(never, |l| l.to_string(), Duration::from_secs(1));
+
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .expect("the deadline must end the body");
+        assert!(body.is_empty());
     }
 }
