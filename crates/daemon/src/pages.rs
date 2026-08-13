@@ -11,17 +11,17 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kuadrat_core::deploy::DeployStatus;
 use kuadrat_core::events::StoredEvent;
-use kuadrat_core::logs::tail;
+use kuadrat_core::logs::{follow, tail};
 use kuadrat_core::store::DeployRow;
 use kuadrat_core::workloads::query::status;
 use maud::{html, Markup, DOCTYPE};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use crate::api::summarise;
-use crate::error::ApiResult;
+use crate::api::{summarise, LOG_STREAM_BACKLOG, LOG_STREAM_DEADLINE};
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-use crate::stream::events_sse;
+use crate::stream::{events_sse, lines_sse};
 
 /// Everything but RFC 3986's unreserved marks (`-`, `.`, `_`, `~`) — in
 /// particular `/`, so a name containing one cannot climb out of the path
@@ -179,6 +179,16 @@ pub(crate) fn registration_page(error: Option<&str>) -> Markup {
     layout("register", registration_form(error))
 }
 
+/// The Follow control's own state, carried in the URL rather than in any
+/// client-side behaviour so the operator's choice survives a reload and can
+/// be linked to. `follow`'s value is never inspected, only its presence —
+/// `?follow=1` and `?follow=` mean the same thing.
+#[derive(Deserialize)]
+pub struct FollowQuery {
+    #[serde(default)]
+    follow: Option<String>,
+}
+
 /// An app's detail page at `GET /app/:name`: status, route, image, its
 /// `RECENT_DEPLOYS` most recent deploys, and a `LOG_LINES`-line log tail.
 ///
@@ -188,7 +198,18 @@ pub(crate) fn registration_page(error: Option<&str>) -> Markup {
 /// store read failure says check the disk, or the database — `index`'s
 /// fail-thin bias does not carry over here, because there the two cases both
 /// mean "nothing to click into right now" and here they do not.
-pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+///
+/// Follow is a control the operator presses, not behaviour on load — the
+/// page renders no `sse-connect` unless `?follow` is present in the URL. That
+/// choice is what `q.follow` gates: present, the page renders the
+/// sse-connected `<ul>` this handler's own `app_log_stream` feeds; absent,
+/// it renders the same bounded tail `logs::tail` always produced, plus a link
+/// that adds the query parameter.
+pub async fn app_detail(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<FollowQuery>,
+) -> Response {
     let config = match st.store.app_config(&name) {
         Ok(Some(c)) => c,
         Ok(None) => return not_found("app"),
@@ -215,19 +236,35 @@ pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) ->
         .recent_deploys(&name, RECENT_DEPLOYS)
         .unwrap_or_default();
 
+    let following = q.follow.is_some();
+
     // The interesting part: one unreadable journal renders a note, not a
     // blank page. This is the one failure mode this handler must not let
-    // escape as a 500 or an empty body.
-    let log_section = match tail(&*st.exec, &name, LOG_LINES).await {
-        Ok(lines) if lines.is_empty() => html! {
-            p id="log-empty" { "No output yet." }
-        },
-        Ok(lines) => html! {
-            pre id="log-tail" { (lines.join("\n")) }
-        },
-        Err(e) => html! {
-            p id="log-error" { "Could not read the journal: " (format!("{e:#}")) }
-        },
+    // escape as a 500 or an empty body. That only applies to the static
+    // read below — a followed page never runs it, since the fragment
+    // stream's own pre-flight `tail` (inside `logs::follow`) is what would
+    // surface an unreadable journal instead.
+    let log_section = if following {
+        html! {
+            ul id="log-tail" class="log-tail"
+                hx-ext="sse"
+                sse-connect={ "/app/" (path_segment(&config.name)) "/logs/stream" }
+                sse-swap="message"
+                hx-swap="beforeend"
+            {}
+        }
+    } else {
+        match tail(&*st.exec, &name, LOG_LINES).await {
+            Ok(lines) if lines.is_empty() => html! {
+                p id="log-empty" { "No output yet." }
+            },
+            Ok(lines) => html! {
+                pre id="log-tail" { (lines.join("\n")) }
+            },
+            Err(e) => html! {
+                p id="log-error" { "Could not read the journal: " (format!("{e:#}")) }
+            },
+        }
     };
 
     let body = html! {
@@ -293,9 +330,52 @@ pub async fn app_detail(State(st): State<AppState>, Path(name): Path<String>) ->
 
         h2 { "Log" }
         (log_section)
+        @if !following {
+            a class="log-follow" href={ "/app/" (path_segment(&config.name)) "?follow=1" } { "Follow" }
+        }
     };
 
     layout(&config.name, body).into_response()
+}
+
+/// One line of a followed journal, as the page's own log tail renders it. The
+/// least trusted string in the system — an app's own stdout/stderr — reaches
+/// here, so this leans on maud's default escaping rather than opting out of
+/// it anywhere: `(line)` is text content, never `PreEscaped`.
+fn log_line(line: &str) -> Markup {
+    html! {
+        li class="log-line" { (line) }
+    }
+}
+
+/// `GET /app/:name/logs/stream`: the same live journal `api::logs_stream`
+/// follows, rendered as an htmx SSE fragment (`log_line`) instead of JSON.
+/// The page's Follow control (`app_detail`, `?follow=1`) connects here; this
+/// is not a third endpoint but the same shape as the JSON stream with a
+/// different renderer, reusing its backlog and deadline constants.
+pub async fn app_log_stream(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Response> {
+    match st.store.app_config(&name) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(ApiError::not_found(format!("no app named {name}"))),
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "reading registration for {name}: {e:#}"
+            )))
+        }
+    }
+
+    let stream = follow(&*st.exec, &name, LOG_STREAM_BACKLOG)
+        .await
+        .map_err(|e| ApiError::internal(format!("reading logs for {name}: {e:#}")))?;
+
+    Ok(lines_sse(
+        stream,
+        |line| log_line(line).into_string(),
+        LOG_STREAM_DEADLINE,
+    ))
 }
 
 /// One row of a deploy's timeline — the single renderer for a row, whether it
@@ -422,7 +502,10 @@ fn store_unavailable(what: &str, e: anyhow::Error) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::tests::{body_text, get, harness_parts, post_form, sse_raw_data, stage_event};
+    use crate::api::tests::{
+        body_text, get, harness_parts, harness_with_journal, post_form, register, sse_raw_data,
+        stage_event,
+    };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use kuadrat_core::deploy::{DeployStatus, Stage};
@@ -755,5 +838,55 @@ mod tests {
             body.contains("/srv/web"),
             "the encoded location must land on the app's own page: {body}"
         );
+    }
+
+    /// Follow is a control the operator presses, not behaviour on load — the
+    /// same judgement H6 made about the app list not refreshing itself.
+    /// Content that moves under a reader is worse than content that is stale,
+    /// unless the reader asked for it.
+    #[tokio::test]
+    async fn the_app_page_offers_follow_without_attaching_a_stream() {
+        let (app, store, _hub, _d) = harness_parts();
+        register(&store, "web");
+
+        let body = body_text(app.oneshot(get("/app/web")).await.expect("send")).await;
+        assert!(body.to_lowercase().contains("follow"), "no control: {body}");
+        assert!(
+            !body.contains("sse-connect"),
+            "the page must not attach on load"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_log_fragment_stream_sends_rows_not_json() {
+        let (app, store, _hub, _d) = harness_with_journal(vec!["hello".into()]);
+        register(&store, "web");
+
+        let res = app
+            .oneshot(get("/app/web/logs/stream"))
+            .await
+            .expect("send");
+        let data = sse_raw_data(res).await;
+        assert!(data[0].starts_with("<li"), "fragment: {}", data[0]);
+        assert!(data[0].contains("hello"));
+    }
+
+    /// The least trusted string in the system, arriving live.
+    #[tokio::test]
+    async fn a_streamed_log_line_containing_markup_is_escaped() {
+        let (app, store, _hub, _d) = harness_with_journal(vec!["<script>alert(1)</script>".into()]);
+        register(&store, "web");
+
+        let res = app
+            .oneshot(get("/app/web/logs/stream"))
+            .await
+            .expect("send");
+        let data = sse_raw_data(res).await;
+        assert!(
+            !data[0].contains("<script>alert(1)</script>"),
+            "raw markup: {}",
+            data[0]
+        );
+        assert!(data[0].contains("&lt;script&gt;"));
     }
 }

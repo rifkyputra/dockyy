@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(crate::pages::index))
         .route("/app/:name", get(crate::pages::app_detail))
+        .route("/app/:name/logs/stream", get(crate::pages::app_log_stream))
         .route("/deploy/:id", get(crate::pages::deploy_detail))
         .route("/deploy/:id/stream", get(crate::pages::deploy_stream))
         .route("/apps", post(register_form))
@@ -272,14 +273,17 @@ async fn logs(
 }
 
 /// The backlog `logs::follow` opens a stream with — a page-sized read, same
-/// as the bounded endpoint's default.
-const LOG_STREAM_BACKLOG: usize = 100;
+/// as the bounded endpoint's default. `pub(crate)` so the page's own log
+/// stream (`pages::app_log_stream`) reuses this instead of declaring a second
+/// copy.
+pub(crate) const LOG_STREAM_BACKLOG: usize = 100;
 
 /// How long a connection is held open before the engine ends it on its own.
 /// `EventSource` reconnects on its own, so a viewer sees a gap of a second
 /// rather than an ended stream — this exists only for the half-dead
-/// connection the server never notices dropping.
-const LOG_STREAM_DEADLINE: Duration = Duration::from_secs(30 * 60);
+/// connection the server never notices dropping. `pub(crate)` for the same
+/// reason as `LOG_STREAM_BACKLOG`.
+pub(crate) const LOG_STREAM_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// A workload's journal, followed live: the last `LOG_STREAM_BACKLOG` lines,
 /// then everything that arrives after, one SSE event per line.
