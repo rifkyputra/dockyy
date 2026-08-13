@@ -317,3 +317,32 @@ The same trade shows up in the browser, not just on the host. The follow view's 
 long-watched chatty app accumulates unbounded DOM plus 100 duplicated lines every half hour. This
 costs the host nothing, and the design accepted the reconnect explicitly, so it is a recorded cost
 of leaving a follow view open indefinitely, not a defect to fix.
+
+## From phase 4 — on SIGTERM, systemd kills the followers, not the daemon
+
+`ChildLines` holds its `Child` so that dropping a stream drops the child and `kill_on_drop` kills the
+`journalctl -f`. That closes three of the four ways a followed stream ends: the client disconnects
+(the keep-alive write fails within about fifteen seconds and hyper drops the body), the 30-minute
+ceiling elapses, or the source errors. On all three the daemon is running and the drop happens.
+
+The fourth is daemon shutdown, and there `kill_on_drop` does **not** fire.
+`crates/daemon/src/lib.rs:71` calls `axum::serve(...)` with no `.with_graceful_shutdown`, so SIGTERM
+terminates the process without unwinding: nothing is dropped, and a `journalctl -f` on a quiet unit
+will not notice its stdout pipe is broken until its next write, which may never come.
+
+What actually reaps them is the deployment shape. `packaging/kuadrat.service` is `Type=simple` and
+sets no `KillMode`, so systemd's default of `control-group` applies and the whole cgroup is
+SIGTERMed then SIGKILLed on stop or restart. Ctrl-C from a shell reaches the children too — same
+process group, no `setsid`. The only leak window is `kill <pid>` against a hand-launched daemon with
+a quiet followed unit, which is not a shipped configuration.
+
+Two things follow, and they are the reason this is written down:
+
+- **The code and the packaging are jointly load-bearing, and neither file says so.** The unit file
+  never mentions `KillMode` because it is taking the default — so a later change that sets
+  `KillMode=process`, for what would look like an unrelated reason, would silently start orphaning a
+  `journalctl` per abandoned viewer on every restart.
+- **Do not add `with_graceful_shutdown` naively.** It is normally an unambiguous improvement, and
+  here it is a hang: graceful shutdown waits for response bodies to end, and these bodies are
+  deliberately long-lived, so shutdown would block on every open follower for up to the full
+  30-minute ceiling. Adding it means also giving the followers a shutdown signal to end on.
