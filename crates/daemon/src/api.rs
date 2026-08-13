@@ -350,7 +350,7 @@ fn sse_event(ev: &StoredEvent) -> String {
 
 // ------------------------------------------------------------------- helpers
 
-fn registration(st: &AppState, name: &str) -> ApiResult<AppConfig> {
+pub(crate) fn registration(st: &AppState, name: &str) -> ApiResult<AppConfig> {
     st.store
         .app_config(name)
         .map_err(|e| ApiError::internal(format!("reading registration: {e:#}")))?

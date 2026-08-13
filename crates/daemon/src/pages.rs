@@ -18,7 +18,7 @@ use maud::{html, Markup, DOCTYPE};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
-use crate::api::{summarise, LOG_STREAM_BACKLOG, LOG_STREAM_DEADLINE};
+use crate::api::{registration, summarise, LOG_STREAM_BACKLOG, LOG_STREAM_DEADLINE};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use crate::stream::{events_sse, lines_sse};
@@ -184,7 +184,7 @@ pub(crate) fn registration_page(error: Option<&str>) -> Markup {
 /// be linked to. `follow`'s value is never inspected, only its presence —
 /// `?follow=1` and `?follow=` mean the same thing.
 #[derive(Deserialize)]
-pub struct FollowQuery {
+pub(crate) struct FollowQuery {
     #[serde(default)]
     follow: Option<String>,
 }
@@ -205,7 +205,15 @@ pub struct FollowQuery {
 /// sse-connected `<ul>` this handler's own `app_log_stream` feeds; absent,
 /// it renders the same bounded tail `logs::tail` always produced, plus a link
 /// that adds the query parameter.
-pub async fn app_detail(
+///
+/// Follow mode runs the same `tail` pre-flight the static path runs, and for
+/// the same reason: an unreadable journal must render `#log-error`, never an
+/// empty body. Without this check the page would open an `EventSource`
+/// against a stream that fails after the fact — `EventSource` treats a
+/// non-2xx/`text/event-stream` response as a connection error and retries
+/// forever, so the operator would see a permanently empty `<ul>` with no
+/// error text, the very failure this handler exists to surface.
+pub(crate) async fn app_detail(
     State(st): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<FollowQuery>,
@@ -238,20 +246,24 @@ pub async fn app_detail(
 
     let following = q.follow.is_some();
 
-    // The interesting part: one unreadable journal renders a note, not a
-    // blank page. This is the one failure mode this handler must not let
-    // escape as a 500 or an empty body. That only applies to the static
-    // read below — a followed page never runs it, since the fragment
-    // stream's own pre-flight `tail` (inside `logs::follow`) is what would
-    // surface an unreadable journal instead.
+    // The interesting part, in both branches: one unreadable journal renders
+    // a note, not a blank page. This is the one failure mode this handler
+    // must not let escape as a 500 or an empty body — following mode runs
+    // the same `tail` pre-flight the static mode always ran, so a journal
+    // that cannot be read fails visibly here instead of silently once
+    // `app_log_stream`'s own copy of this check runs behind an `EventSource`
+    // that only retries.
     let log_section = if following {
-        html! {
-            ul id="log-tail" class="log-tail"
-                hx-ext="sse"
-                sse-connect={ "/app/" (path_segment(&config.name)) "/logs/stream" }
-                sse-swap="message"
-                hx-swap="beforeend"
-            {}
+        match tail(&*st.exec, &name, LOG_LINES).await {
+            Ok(_) => html! {
+                ul id="log-tail" class="log-tail"
+                    hx-ext="sse"
+                    sse-connect={ "/app/" (path_segment(&config.name)) "/logs/stream" }
+                    sse-swap="message"
+                    hx-swap="beforeend"
+                {}
+            },
+            Err(e) => log_read_error(&e),
         }
     } else {
         match tail(&*st.exec, &name, LOG_LINES).await {
@@ -261,9 +273,7 @@ pub async fn app_detail(
             Ok(lines) => html! {
                 pre id="log-tail" { (lines.join("\n")) }
             },
-            Err(e) => html! {
-                p id="log-error" { "Could not read the journal: " (format!("{e:#}")) }
-            },
+            Err(e) => log_read_error(&e),
         }
     };
 
@@ -338,6 +348,15 @@ pub async fn app_detail(
     layout(&config.name, body).into_response()
 }
 
+/// The one `#log-error` rendering, shared by both the static tail and the
+/// follow pre-flight, so an unreadable journal reads the same way regardless
+/// of which mode found it.
+fn log_read_error(e: &anyhow::Error) -> Markup {
+    html! {
+        p id="log-error" { "Could not read the journal: " (format!("{e:#}")) }
+    }
+}
+
 /// One line of a followed journal, as the page's own log tail renders it. The
 /// least trusted string in the system — an app's own stdout/stderr — reaches
 /// here, so this leans on maud's default escaping rather than opting out of
@@ -357,15 +376,10 @@ pub async fn app_log_stream(
     State(st): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Response> {
-    match st.store.app_config(&name) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Err(ApiError::not_found(format!("no app named {name}"))),
-        Err(e) => {
-            return Err(ApiError::internal(format!(
-                "reading registration for {name}: {e:#}"
-            )))
-        }
-    }
+    // 404 before a stream is opened, the same check and the same error text
+    // `api::logs_stream` uses — a second, hand-rolled copy of this is exactly
+    // what let its error text drift from this one's before this fix.
+    registration(&st, &name)?;
 
     let stream = follow(&*st.exec, &name, LOG_STREAM_BACKLOG)
         .await
@@ -503,8 +517,8 @@ fn store_unavailable(what: &str, e: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use crate::api::tests::{
-        body_text, get, harness_parts, harness_with_journal, post_form, register, sse_raw_data,
-        stage_event,
+        body_text, get, harness_parts, harness_with_failing_logs, harness_with_journal, post_form,
+        register, sse_raw_data, stage_event,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -888,5 +902,47 @@ mod tests {
             data[0]
         );
         assert!(data[0].contains("&lt;script&gt;"));
+    }
+
+    /// The positive half of the Follow pair: `?follow=1` must actually attach
+    /// the stream, not merely fail to attach it — a `FollowQuery` that stopped
+    /// deserializing `follow` would leave
+    /// `the_app_page_offers_follow_without_attaching_a_stream` passing while
+    /// this branch was dead code.
+    #[tokio::test]
+    async fn the_app_page_attaches_to_its_stream_when_following() {
+        let (app, store, _hub, _d) = harness_with_journal(vec![]);
+        register(&store, "web");
+
+        let body = body_text(app.oneshot(get("/app/web?follow=1")).await.expect("send")).await;
+        assert!(
+            body.contains(r#"sse-connect="/app/web/logs/stream""#),
+            "no stream attached: {body}"
+        );
+        assert!(body.contains(r#"hx-ext="sse""#), "no sse extension: {body}");
+        assert!(
+            !body.contains("log-follow"),
+            "the Follow link must not remain once already following: {body}"
+        );
+    }
+
+    /// Follow mode must not trade the static page's "never a blank body"
+    /// invariant away: an unreadable journal has to fail before the
+    /// `EventSource` connects, because once it has connected the browser only
+    /// retries — silently, with no error text ever reaching the operator.
+    #[tokio::test]
+    async fn a_failing_journal_in_follow_mode_shows_the_error_not_a_stream() {
+        let (app, store, _hub, _d) = harness_with_failing_logs();
+        register(&store, "web");
+
+        let body = body_text(app.oneshot(get("/app/web?follow=1")).await.expect("send")).await;
+        assert!(
+            body.contains("Could not read the journal"),
+            "no error surfaced: {body}"
+        );
+        assert!(
+            !body.contains("sse-connect"),
+            "a stream must not be attached over an unreadable journal: {body}"
+        );
     }
 }
