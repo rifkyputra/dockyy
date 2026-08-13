@@ -202,6 +202,30 @@ for the daemon's process; and structurally, pinning `SYSTEMD_LOG_LEVEL=info` and
 the journalctl child specifically belongs with a future `Executor` env parameter, not a
 workaround in this module.
 
+## From H3 — live tailing was deferred to phase 4 (CLOSED, 2026-08-13)
+
+Phase 4 landed it, rather than the gap surviving as a standing note in this file (H3's own
+checklist only required recording journald sanitisation, above — the deferral itself lived in the
+phase-3 design docs, not here). `Executor::run_streaming` is a new seam
+(`crates/core/src/exec/mod.rs`), with a default impl that `bail!`s so a future executor — the
+fleet driver's SSH one — compiles before it opts in; `LocalExecutor` implements it by holding the
+`Child` alongside the stream, so dropping the stream (`kill_on_drop`) is what actually stops
+`journalctl -f`. `logs::follow` (`crates/core/src/logs/mod.rs`) runs the existing bounded `tail`
+as a pre-flight first, because journald's "you may not read this journal" hint arrives on stderr
+while the process still exits 0 and prints `-- No entries --` to stdout — a stream carrying stdout
+alone cannot tell that apart from a quiet app — and its backlog is clamped to `logs::MAX_LINES`
+like every other read.
+
+Two endpoints serve the same stream: `GET /api/apps/:name/logs/stream` (JSON) and the same
+`GET /app/:name` route with `?follow=1` (SSE-driven htmx, via `lines_sse` — a second, simpler SSE
+engine than the deploy-events one, because log lines have no store ids to dedupe or resume from).
+The backlog is 100 lines and the connection is capped at 30 minutes. A page-level pre-flight
+catches an unreadable journal before the follow view ever opens its `EventSource`, rendering the
+same `#log-error` text the static tail shows — without that check the operator would see a
+permanently blank list, because `EventSource` retries a JSON 500 forever rather than surfacing it.
+
+The second consumer of the JSON endpoint — the MCP surface — has not landed yet.
+
 ## From H6 — vendored frontend assets
 
 `crates/daemon/assets/` carries htmx 2.0.10 and `htmx-ext-sse` 2.2.4, vendored because the daemon
@@ -277,3 +301,12 @@ detach from, and something not yet considered.
 Not blocking phase 4: the feature works — the same deploy succeeds through the daemon in about a
 second, and the fallback's own message prints correctly. What is untrustworthy is the *bound*, which
 means a pathological deploy can still stall a CLI invocation indefinitely.
+
+## From phase 4 — a followed stream holds a `journalctl` for up to 30 minutes
+
+Each viewer following a log holds one `journalctl -f` process. Dropping the stream kills it, and a
+30-minute ceiling bounds the connection the server never notices dropping — but a host with several
+operators watching several apps holds one process each for as long as they watch.
+
+That is the intended cost of live tailing and not a defect. It is recorded because the premise of
+this project is a low-memory host, and "how many followers is too many" has never been measured.

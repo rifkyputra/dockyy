@@ -67,8 +67,8 @@ kuadrat deploy pbrain
 - **Deploy loop** — detect stack, build, render a `.container` unit, route through Caddy with
   automatic TLS, healthcheck, roll back on failure
 - **Secrets** — `podman secret` management; specs carry names, never values
-- **Logs** — journald reads scoped to a unit
-- **Web UI** — status, live deploy progress, logs
+- **Logs** — journald reads scoped to a unit, streamable live as JSON for an API client
+- **Web UI** — status, live deploy progress, logs, live log following
 - **MCP surface** — an agent can diagnose failures, deploy, and author config. Advisory only:
   it proposes, a human approves
 - **Events** — typed and subscribable; kuadrat emits, subscribers deliver
@@ -289,6 +289,7 @@ UI from elsewhere is the operator's job via SSH tunnel or VPN.
 | [Phase 1 design](docs/design/2026-08-10-design.md) | Architecture, components, data flow, error handling, testing |
 | [Phase 2 design](docs/design/2026-08-10-phase-2-deploy-loop.md) | The deploy loop: state machine, gateway, secrets, store, events |
 | [Phase 3 design](docs/design/2026-08-11-phase-3-daemon-and-surfaces.md) | The daemon: HTTP API, SSE, htmx UI, logs, webhook |
+| [Phase 4 design](docs/design/2026-08-11-phase-4-live-logs.md) | The streaming seam and live log tailing |
 | [Examples](examples/) | A runnable app, its Docker equivalent, and the runtime benchmark |
 | [Plans](docs/plans/) | Per-gate implementation plans, task by task |
 | [Known gaps](docs/known-gaps.md) | Deferred findings, acceptance records, what to re-read before which phase |
