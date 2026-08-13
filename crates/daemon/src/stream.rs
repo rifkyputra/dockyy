@@ -271,7 +271,7 @@ where
 /// store-assigned identity for a client to resume from, unlike a stored
 /// event.
 fn to_line_event(data: String) -> sse::Event {
-    sse::Event::default().data(data.replace(['\r', '\n'], " "))
+    sse::Event::default().data(sanitize(data))
 }
 
 fn is_finished(ev: &StoredEvent) -> bool {
@@ -283,8 +283,22 @@ fn is_finished(ev: &StoredEvent) -> bool {
 /// `events_sse`'s doc comment for why that and the `\r`/`\n` sanitisation both
 /// live here instead of in each renderer.
 fn to_sse_event(id: i64, data: String) -> sse::Event {
-    let sanitized = data.replace(['\r', '\n'], " ");
-    sse::Event::default().id(id.to_string()).data(sanitized)
+    sse::Event::default()
+        .id(id.to_string())
+        .data(sanitize(data))
+}
+
+/// Strip the characters `sse::Event::data` refuses to carry.
+///
+/// `axum`'s SSE writer asserts a `data` field contains no `\r` — the wire
+/// format is line-based, and a bare CR breaks its framing — and `\n` needs
+/// the same treatment so a multi-line payload stays one event. Both
+/// [`events_sse`] and [`lines_sse`] are separate engines with separate
+/// renderers, and both must honour that assertion, so the rule lives here
+/// once rather than in either renderer, where a third engine could land
+/// without it.
+fn sanitize(data: String) -> String {
+    data.replace(['\r', '\n'], " ")
 }
 
 /// The id a reconnecting browser last saw. `EventSource` sets this header

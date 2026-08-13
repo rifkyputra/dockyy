@@ -59,6 +59,20 @@ code, pre {
   font-size: 0.9em;
 }
 
+/* The follow view replaces <pre id="log-tail"> with <ul class="log-tail">
+   for the same journal; without this it inherits the body's proportional
+   font and default list bullets instead of reading as the same tail. */
+.log-tail {
+  list-style: none;
+  padding-left: 0;
+}
+
+.log-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

@@ -310,3 +310,10 @@ operators watching several apps holds one process each for as long as they watch
 
 That is the intended cost of live tailing and not a defect. It is recorded because the premise of
 this project is a low-memory host, and "how many followers is too many" has never been measured.
+
+The same trade shows up in the browser, not just on the host. The follow view's `<ul>` grows with
+`hx-swap="beforeend"` for the life of the connection — nothing ever removes a line — and on the
+30-minute reconnect the new stream replays its 100-line backlog straight into the same list, so a
+long-watched chatty app accumulates unbounded DOM plus 100 duplicated lines every half hour. This
+costs the host nothing, and the design accepted the reconnect explicitly, so it is a recorded cost
+of leaving a follow view open indefinitely, not a defect to fix.

@@ -256,7 +256,7 @@ pub(crate) async fn app_detail(
     let log_section = if following {
         match tail(&*st.exec, &name, LOG_LINES).await {
             Ok(_) => html! {
-                ul id="log-tail" class="log-tail"
+                ul class="log-tail"
                     hx-ext="sse"
                     sse-connect={ "/app/" (path_segment(&config.name)) "/logs/stream" }
                     sse-swap="message"
@@ -340,7 +340,9 @@ pub(crate) async fn app_detail(
 
         h2 { "Log" }
         (log_section)
-        @if !following {
+        @if following {
+            a class="log-follow" href={ "/app/" (path_segment(&config.name)) } { "Stop following" }
+        } @else {
             a class="log-follow" href={ "/app/" (path_segment(&config.name)) "?follow=1" } { "Follow" }
         }
     };
@@ -372,7 +374,7 @@ fn log_line(line: &str) -> Markup {
 /// The page's Follow control (`app_detail`, `?follow=1`) connects here; this
 /// is not a third endpoint but the same shape as the JSON stream with a
 /// different renderer, reusing its backlog and deadline constants.
-pub async fn app_log_stream(
+pub(crate) async fn app_log_stream(
     State(st): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Response> {
@@ -921,8 +923,27 @@ mod tests {
         );
         assert!(body.contains(r#"hx-ext="sse""#), "no sse extension: {body}");
         assert!(
-            !body.contains("log-follow"),
+            !body.contains(">Follow<"),
             "the Follow link must not remain once already following: {body}"
+        );
+        assert!(
+            body.contains("Stop following"),
+            "following mode must offer a way back to the static tail: {body}"
+        );
+    }
+
+    /// The symmetric half of the pair above: the static page (not following)
+    /// must offer Follow and never the escape hatch back out of it.
+    #[tokio::test]
+    async fn the_app_page_offers_follow_but_not_stop_following_when_static() {
+        let (app, store, _hub, _d) = harness_parts();
+        register(&store, "web");
+
+        let body = body_text(app.oneshot(get("/app/web")).await.expect("send")).await;
+        assert!(body.contains(">Follow<"), "no Follow link: {body}");
+        assert!(
+            !body.contains("Stop following"),
+            "the static page must not offer to stop a follow it never started: {body}"
         );
     }
 

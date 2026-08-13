@@ -1,9 +1,13 @@
-//! Bounded journald reads scoped to one kuadrat workload.
+//! Journald reads and follows scoped to one kuadrat workload.
 //!
-//! Both functions go through the [`Executor`] seam like every other host
-//! interaction, and both bound their output: this module never runs
-//! `journalctl -f`. Live tailing needs a streaming seam that does not exist
-//! yet, and arrives in phase 4 where the agent surface needs it too.
+//! `tail` and `search` go through the [`Executor`] seam like every other host
+//! interaction, and bound their output by line count: neither ever runs
+//! `journalctl -f`. `follow` is different — it runs `journalctl -f` through
+//! [`Executor::run_streaming`], the streaming seam phase 4 built for exactly
+//! this, and it is bounded by its caller dropping the returned stream (which
+//! kills the `journalctl` child) rather than by a line count, though the
+//! backlog it opens with is still clamped to [`MAX_LINES`] like every other
+//! read.
 //!
 //! ## The privilege signal depends on an unsuppressed stderr
 //!
@@ -20,9 +24,12 @@
 //! the daemon must not set `SYSTEMD_LOG_LEVEL` to `warning` or above, and a
 //! more durable fix (pinning `SYSTEMD_LOG_LEVEL=info` and `LC_ALL=C` for the
 //! journalctl child specifically) belongs with a future `Executor` env
-//! parameter, not a workaround here.
+//! parameter, not a workaround here. This governs `follow` too, not just
+//! `tail` and `search`: `follow`'s pre-flight call to `tail` is what carries
+//! the detection before any stream ever opens.
 //!
 //! [`LocalExecutor`]: crate::exec::local::LocalExecutor
+//! [`Executor::run_streaming`]: crate::exec::Executor::run_streaming
 
 use anyhow::{bail, Context, Result};
 use tokio_stream::Stream;
@@ -104,16 +111,8 @@ pub async fn follow(
 ) -> Result<Box<dyn Stream<Item = Result<String>> + Send + Unpin>> {
     tail(exec, name, lines).await?;
 
-    let lines = lines.clamp(1, MAX_LINES);
-    let args = vec![
-        "-u".to_string(),
-        unit_name(name),
-        "-f".to_string(),
-        "-n".to_string(),
-        lines.to_string(),
-        "--no-pager".to_string(),
-        "--output=short-iso".to_string(),
-    ];
+    let mut args = base_args(name, lines);
+    args.push("-f".to_string());
 
     exec.run_streaming("journalctl", &args).await
 }
