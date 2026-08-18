@@ -119,7 +119,7 @@ plan builds one:
   - (a placeholder `daemon::Daemon` trait so `serve`'s signature is final from the start — Task 3
     fills it in; in this task it is an empty trait)
 
-- [ ] **Step 1: Create the crate**
+- [x] **Step 1: Create the crate**
 
 `crates/mcp/Cargo.toml`:
 
@@ -140,7 +140,7 @@ async-trait.workspace = true
 
 Root `Cargo.toml`: `members = ["crates/core", "crates/daemon", "crates/cli", "crates/mcp"]`.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 In `crates/mcp/src/lib.rs`'s test module. The harness drives `serve` over an in-memory duplex
 pipe — this helper is used by every later task's tests too:
@@ -246,7 +246,7 @@ pipe — this helper is used by every later task's tests too:
     }
 ```
 
-- [ ] **Step 3: Run to verify they fail**
+- [x] **Step 3: Run to verify they fail**
 
 ```bash
 PATH=$HOME/.cargo/bin:$PATH cargo test -p kuadrat-mcp 2>&1 | tail -15
@@ -254,7 +254,7 @@ PATH=$HOME/.cargo/bin:$PATH cargo test -p kuadrat-mcp 2>&1 | tail -15
 
 Expected: compile failure — the crate has no `serve`, `rpc`, `daemon`.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `crates/mcp/src/rpc.rs`:
 
@@ -370,7 +370,7 @@ fn handle(req: &rpc::Incoming) -> Option<String> {
 pub trait Daemon: Send + Sync {}
 ```
 
-- [ ] **Step 5: Run the suite**
+- [x] **Step 5: Run the suite**
 
 ```bash
 PATH=$HOME/.cargo/bin:$PATH cargo test --workspace 2>&1 | grep -E "Running|test result"
@@ -378,7 +378,7 @@ PATH=$HOME/.cargo/bin:$PATH cargo test --workspace 2>&1 | grep -E "Running|test 
 
 Expected: mcp **4**, core 202, daemon 90, cli 30. `make check` clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/mcp
@@ -404,7 +404,7 @@ git commit -m "feat(mcp): a JSON-RPC line loop over an in-memory-testable pipe"
   - `fn meta_version(params: &serde_json::Value) -> Option<&str>` — reads
     `params._meta["io.modelcontextprotocol/protocolVersion"]`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     /// The modern path is stateless: discover, then a call carrying _meta —
@@ -478,11 +478,11 @@ git commit -m "feat(mcp): a JSON-RPC line loop over an in-memory-testable pipe"
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Expected: the era tests fail with `-32601` where results were expected.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `lib.rs`. The serve loop gains `let mut era = Era::Undetermined;` and passes
 `&mut era` to `handle`. The dispatch:
@@ -528,11 +528,11 @@ pub const LEGACY_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"
      would refuse the request that exists to prevent misreads).
    - anything else → `-32600`, message: `"send initialize first, or declare a protocol version in _meta (io.modelcontextprotocol/protocolVersion)"`.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: mcp **9** (4 + 5), everything else unchanged. `make check` clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mcp
@@ -559,7 +559,7 @@ git commit -m "feat(mcp): dual-era protocol gate — server/discover and the leg
   - `pub fn path_segment(s: &str) -> String` — RFC 3986 unreserved-marks encoder, same as
     `daemon_client.rs`'s (reimplemented here: this crate does not link the cli)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     /// curl exit 7 is "failed to connect": the one and only Unreachable.
@@ -602,9 +602,9 @@ git commit -m "feat(mcp): dual-era protocol gate — server/discover and the leg
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `CurlDaemon::request` spawns curl via `tokio::process::Command` (this crate does not have
 `core`'s `Executor` — deliberately; the seam for tests is `Daemon`, one level up, as the design
@@ -650,11 +650,11 @@ Delete the placeholder empty trait from Task 1; `NoDaemon` in the lib tests beco
 `FakeDaemon::new()` (unscripted = every request refused, which those tests never notice — they
 never reach a tool).
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: mcp **13** (9 + 4). `make check` clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mcp
@@ -695,7 +695,7 @@ Descriptions say what an agent needs to choose well; three carry the load:
 - `reconcile`: "Roll back deploys left in progress by a crash. Waits for the deploy slot, so it
   cannot interrupt a live deploy. Returns the outcomes; an empty list means nothing was stranded."
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tools.rs`'s test module:
 
@@ -842,9 +842,9 @@ And in `lib.rs`'s test module, the two ends meet — both eras:
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `tools.rs`: `definitions()` returns the literal `serde_json::json!` array from the table above.
 `dispatch` matches the name, pulls arguments (`BadArguments` when a required one is missing or
@@ -870,11 +870,11 @@ In `lib.rs`, both eras route `tools/list` → `definitions()` and `tools/call` �
 - `Dispatched::UnknownTool` → `-32602`, message `"Unknown tool: {name}"`.
 - `Dispatched::BadArguments(msg)` → `-32602`, message `msg`.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: mcp **22** (13 + 9). `make check` clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mcp
@@ -901,7 +901,7 @@ CLI's in-process reconcile needs no such guard because no daemon is running when
 to use; this endpoint is how an agent reaches the same recovery *through* the running daemon
 without that footgun.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `api.rs`'s test module, using the existing `harness_parts` pattern:
 
@@ -930,9 +930,9 @@ deploy run — check how `core`'s own reconcile tests seed `in_progress` rows
 exposes allows it; if it does not, the empty-list test plus `core`'s existing reconcile coverage
 is the honest boundary, and say so in the commit message.
 
-- [ ] **Step 2: Run to verify it fails** (404 — no route)
+- [x] **Step 2: Run to verify it fails** (404 — no route)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 #[derive(Serialize)]
@@ -962,12 +962,12 @@ async fn reconcile_api(State(st): State<AppState>) -> ApiResult<Json<ReconcileOu
 
 Route: `.route("/api/reconcile", post(reconcile_api))` beside the other `/api` routes.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: daemon **91** (90 + 1, or 92 if the stranded-row test proved writable). `make check`
 clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/daemon
@@ -987,7 +987,7 @@ git commit -m "feat(daemon): reconcile through the daemon, gated by the deploy s
   at the root)
 - Produces: `kuadrat mcp [--listen <addr>]`
 
-- [ ] **Step 1: Wire it**
+- [x] **Step 1: Wire it**
 
 `crates/cli/Cargo.toml`: `kuadrat-mcp = { path = "../mcp" }`.
 
@@ -1023,7 +1023,7 @@ The match arm:
         }
 ```
 
-- [ ] **Step 2: Prove it end to end, no daemon**
+- [x] **Step 2: Prove it end to end, no daemon**
 
 ```bash
 PATH=$HOME/.cargo/bin:$PATH cargo build 2>&1 | tail -3
@@ -1032,7 +1032,7 @@ PATH=$HOME/.cargo/bin:$PATH cargo build 2>&1 | tail -3
 
 Expected: a stderr line naming `kuadrat serve`, `exit=1`, nothing on stdout.
 
-- [ ] **Step 3: Prove it end to end, with a daemon**
+- [x] **Step 3: Prove it end to end, with a daemon**
 
 ```bash
 ROOT=$(mktemp -d)
@@ -1050,12 +1050,12 @@ Expected: two JSON lines — a `DiscoverResult`, then a `tools/call` result whos
 daemon's (empty) app list. If `serve` does not take `--root`, run it bare on the default port
 with the same two lines; the probe and the list still exercise the whole path.
 
-- [ ] **Step 4: Run the suite + `make check`**
+- [x] **Step 4: Run the suite + `make check`**
 
 Expected: counts unchanged from Task 5 (the subcommand is wiring; its behavior is the mcp
 crate's, already under test). `make check` clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/cli Cargo.lock
@@ -1069,7 +1069,7 @@ git commit -m "feat(cli): kuadrat mcp — the agent surface, daemon-required"
 **Files:**
 - Modify: `README.md`, `docs/known-gaps.md`, `docs/design/2026-08-13-phase-5-mcp-surface.md`
 
-- [ ] **Step 1: The design addendum**
+- [x] **Step 1: The design addendum**
 
 Append a dated section to the design doc: the protocol check it mandated found revision
 **2026-07-28** (per-request `_meta` versioning, mandatory `server/discover`, `-32022`), the
@@ -1077,7 +1077,7 @@ handshake it described is now the legacy era, and what shipped is dual-era. Two 
 open questions it left: `deploy` returns immediately and `reconcile` is a tool, both confirmed
 by Rifky 2026-08-18 before implementation.
 
-- [ ] **Step 2: known-gaps**
+- [x] **Step 2: known-gaps**
 
 Two entries:
 
@@ -1098,7 +1098,7 @@ retry a few times before reading it. Deliberate: exiting the MCP process mid-ses
 the agent's whole surface down to report one dead dependency.
 ```
 
-- [ ] **Step 3: README**
+- [x] **Step 3: README**
 
 In the surfaces list, one sentence: the MCP surface (`kuadrat mcp`, stdio) exposes
 `list_apps` / `get_app` / `deploy` / `get_deploy` / `tail_logs` / `reconcile` to any MCP
@@ -1109,7 +1109,7 @@ client-config one-liner:
 claude mcp add kuadrat -- kuadrat mcp
 ```
 
-- [ ] **Step 4: Run the full gauntlet, then commit**
+- [x] **Step 4: Run the full gauntlet, then commit**
 
 ```bash
 PATH=$HOME/.cargo/bin:$PATH cargo test --workspace 2>&1 | grep -E "Running|test result"
@@ -1126,16 +1126,26 @@ git commit -m "docs: record the MCP surface and what it inherits"
 
 ## Completion checklist
 
-- [ ] `cargo test --workspace` passes: core 202 (untouched), daemon 91+, cli 30, mcp 22
-- [ ] `make check` clean
-- [ ] `crates/mcp` does not link `kuadrat-core` (`grep kuadrat-core crates/mcp/Cargo.toml` → nothing)
-- [ ] No new external dependency (`crates/mcp/Cargo.toml` names only workspace deps)
-- [ ] A modern client works without `initialize`; a legacy client works with it — both proven by tests
-- [ ] Unknown tool → `-32602`; daemon refusal → `isError: true` carrying the daemon's message — proven by tests
-- [ ] Startup without a daemon exits non-zero naming `kuadrat serve` — proven end to end
-- [ ] `/api/reconcile` acquires the deploy slot before reconciling
-- [ ] No secrets, no remove, no follow_logs in the tool list
-- [ ] stdout carries only JSON-RPC lines (banner/logs on stderr only)
+> Closed 2026-08-18, verified on sumo, same day as written. Measured: core 202, daemon 91,
+> cli 30, mcp 22 — exactly as planned. Both eras proven end to end against a real daemon on a
+> temp root (`server/discover` + modern `tools/call`; `initialize` + legacy `tools/list`), and
+> the no-daemon refusal proven at the binary level (stderr names `kuadrat serve`, exit 1,
+> stdout silent). One deviation, recorded in `ecdd68c`: the plan's test harness split the
+> client `DuplexStream` and dropped the write half for EOF — split halves keep the stream alive
+> until both drop, so the shipped harness keeps the client whole and uses `shutdown()`. One
+> addition beyond the plan text: `crates/cli` enables tokio's `io-std` feature (crate-local) for
+> `tokio::io::{stdin, stdout}` — a feature flag on an existing dependency, not a new one.
+
+- [x] `cargo test --workspace` passes: core 202 (untouched), daemon 91+, cli 30, mcp 22 — measured: core 202, daemon 91, cli 30, mcp 22, 0 failed
+- [x] `make check` clean
+- [x] `crates/mcp` does not link `kuadrat-core` (`grep kuadrat-core crates/mcp/Cargo.toml` → nothing)
+- [x] No new external dependency (`crates/mcp/Cargo.toml` names only workspace deps)
+- [x] A modern client works without `initialize`; a legacy client works with it — both proven by tests
+- [x] Unknown tool → `-32602`; daemon refusal → `isError: true` carrying the daemon's message — proven by tests
+- [x] Startup without a daemon exits non-zero naming `kuadrat serve` — proven end to end
+- [x] `/api/reconcile` acquires the deploy slot before reconciling
+- [x] No secrets, no remove, no follow_logs in the tool list
+- [x] stdout carries only JSON-RPC lines (banner/logs on stderr only)
 
 ## Not in this group
 
