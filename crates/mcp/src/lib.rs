@@ -6,7 +6,26 @@
 pub mod daemon;
 pub mod rpc;
 
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+/// The current MCP revision: per-request `_meta` versioning, mandatory
+/// `server/discover`, no handshake. Read from the specification 2026-08-18,
+/// as the design mandates.
+pub const MODERN_VERSION: &str = "2026-07-28";
+
+/// Handshake-based revisions this server still answers `initialize` for.
+/// An unknown requested version is answered with the first entry — the
+/// legacy negotiation rule is "respond with your latest supported".
+pub const LEGACY_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
+
+/// Which protocol era this process is speaking. Modern requests are served
+/// statelessly; an `initialize` selects legacy semantics for the rest of the
+/// process, per the 2026-07-28 spec's dual-era server rules.
+enum Era {
+    Undetermined,
+    Legacy,
+}
 
 /// Read newline-delimited JSON-RPC from `reader`, answer on `writer`, return
 /// on EOF — which is the stdio transport's graceful-shutdown signal.
@@ -16,6 +35,7 @@ pub async fn serve(
     writer: impl AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
     let _ = daemon;
+    let mut era = Era::Undetermined;
     let mut writer = writer;
     let mut lines = reader.lines();
     while let Some(line) = lines.next_line().await? {
@@ -24,7 +44,7 @@ pub async fn serve(
         }
         let out = match rpc::parse_line(&line) {
             Err(fault) => Some(rpc::error_line(None, -32700, &fault, None)),
-            Ok(req) => handle(&req),
+            Ok(req) => handle(&req, &mut era),
         };
         if let Some(out) = out {
             writer.write_all(out.as_bytes()).await?;
@@ -35,17 +55,121 @@ pub async fn serve(
     Ok(())
 }
 
-/// `None` = notification, nothing to write. Task 2 replaces the body with the
-/// real era-aware dispatch; the shape (borrow the request, return the line)
-/// is final from the start.
-fn handle(req: &rpc::Incoming) -> Option<String> {
+fn server_info() -> Value {
+    json!({ "name": "kuadrat", "version": env!("CARGO_PKG_VERSION") })
+}
+
+/// The modern per-request protocol version, when the request declares one.
+fn meta_version(params: &Value) -> Option<&str> {
+    params
+        .get("_meta")?
+        .get("io.modelcontextprotocol/protocolVersion")?
+        .as_str()
+}
+
+/// `None` = notification, nothing to write.
+fn handle(req: &rpc::Incoming, era: &mut Era) -> Option<String> {
+    // `initialize` selects legacy semantics for the rest of the process,
+    // whatever came before it.
+    if req.method == "initialize" {
+        let id = req.id.as_ref()?;
+        *era = Era::Legacy;
+        let requested = req
+            .params
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let negotiated = if LEGACY_VERSIONS.contains(&requested) {
+            requested
+        } else {
+            LEGACY_VERSIONS[0]
+        };
+        return Some(rpc::response_line(
+            id,
+            json!({
+                "protocolVersion": negotiated,
+                "capabilities": { "tools": {} },
+                "serverInfo": server_info(),
+            }),
+        ));
+    }
+
+    // Notifications are never answered. `notifications/initialized` needs no
+    // action either — the era flipped when `initialize` was served.
     let id = req.id.as_ref()?;
-    Some(rpc::error_line(
-        Some(id),
-        -32601,
-        &format!("method not found: {}", req.method),
-        None,
-    ))
+
+    // A method this server never serves, in any era, is -32601 outright.
+    // -32600 below is reserved for a method we DO serve arriving before the
+    // client has established how it is speaking — a different mistake with a
+    // different fix, and the error text says which.
+    if !matches!(
+        req.method.as_str(),
+        "server/discover" | "ping" | "tools/list" | "tools/call"
+    ) {
+        return Some(rpc::error_line(
+            Some(id),
+            -32601,
+            &format!("method not found: {}", req.method),
+            None,
+        ));
+    }
+
+    if let Some(v) = meta_version(&req.params) {
+        // A request carrying modern `_meta` is served statelessly.
+        if v != MODERN_VERSION {
+            return Some(rpc::error_line(
+                Some(id),
+                -32022,
+                "Unsupported protocol version",
+                Some(json!({ "supported": [MODERN_VERSION], "requested": v })),
+            ));
+        }
+        return Some(dispatch(req, id, true));
+    }
+
+    match era {
+        Era::Legacy => Some(dispatch(req, id, false)),
+        // `server/discover` is the compatibility probe; refusing the request
+        // that exists to prevent misreads would defeat it. Everything else
+        // needs an era first.
+        Era::Undetermined if req.method == "server/discover" => Some(dispatch(req, id, true)),
+        Era::Undetermined => Some(rpc::error_line(
+            Some(id),
+            -32600,
+            "send initialize first, or declare a protocol version in _meta \
+             (io.modelcontextprotocol/protocolVersion)",
+            None,
+        )),
+    }
+}
+
+/// One method, one line out. `modern` decides whether results carry the
+/// 2026-07-28 `resultType` marker; the method set is the same in both eras.
+fn dispatch(req: &rpc::Incoming, id: &Value, modern: bool) -> String {
+    match req.method.as_str() {
+        "server/discover" => {
+            let result = json!({
+                "resultType": "complete",
+                "supportedVersions": [MODERN_VERSION],
+                "capabilities": { "tools": {} },
+                "_meta": { "io.modelcontextprotocol/serverInfo": server_info() },
+            });
+            rpc::response_line(id, result)
+        }
+        "ping" => {
+            let mut result = json!({});
+            if modern {
+                result["resultType"] = json!("complete");
+            }
+            rpc::response_line(id, result)
+        }
+        other => rpc::error_line(
+            Some(id),
+            -32601,
+            &format!("method not found: {other}"),
+            None,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +267,105 @@ mod tests {
         )
         .await;
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// The modern path is stateless: discover, then a call carrying _meta —
+    /// no initialize anywhere.
+    #[tokio::test]
+    async fn a_modern_client_needs_no_initialize() {
+        let out = session(
+            &NoDaemon,
+            &[serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } })],
+        )
+        .await;
+        let r = &out[0]["result"];
+        assert_eq!(r["resultType"], "complete");
+        assert_eq!(r["supportedVersions"][0], "2026-07-28");
+        assert!(r["capabilities"]["tools"].is_object(), "{r}");
+        assert_eq!(
+            r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "kuadrat"
+        );
+    }
+
+    /// -32022 with the supported list: the client's retry depends on it.
+    #[tokio::test]
+    async fn an_unsupported_modern_version_is_minus_32022_naming_supported() {
+        let out = session(
+            &NoDaemon,
+            &[serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "1900-01-01" } } })],
+        )
+        .await;
+        assert_eq!(out[0]["error"]["code"], -32022);
+        assert_eq!(out[0]["error"]["data"]["supported"][0], "2026-07-28");
+        assert_eq!(out[0]["error"]["data"]["requested"], "1900-01-01");
+    }
+
+    /// The legacy handshake: a known requested version is echoed back.
+    #[tokio::test]
+    async fn initialize_echoes_a_known_legacy_version() {
+        let out = session(
+            &NoDaemon,
+            &[
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18",
+                            "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } }),
+            ],
+        )
+        .await;
+        let r = &out[0]["result"];
+        assert_eq!(r["protocolVersion"], "2025-06-18");
+        assert!(r["capabilities"]["tools"].is_object());
+        assert_eq!(r["serverInfo"]["name"], "kuadrat");
+        assert!(
+            r.get("resultType").is_none(),
+            "legacy results carry no resultType"
+        );
+    }
+
+    /// The legacy rule for an unknown request: answer with our latest legacy.
+    #[tokio::test]
+    async fn initialize_with_an_unknown_version_answers_2025_11_25() {
+        let out = session(
+            &NoDaemon,
+            &[
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "1900-01-01",
+                            "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } }),
+            ],
+        )
+        .await;
+        assert_eq!(out[0]["result"]["protocolVersion"], "2025-11-25");
+    }
+
+    /// The design's pin: a tools/call arriving before any era is established
+    /// is an error, not a panic — and the session survives to serve the
+    /// initialize that follows.
+    #[tokio::test]
+    async fn a_call_before_any_era_is_an_error_and_the_session_survives() {
+        let out = session(
+            &NoDaemon,
+            &[
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                    "params": { "protocolVersion": "2025-11-25",
+                                "capabilities": {}, "clientInfo": { "name": "t", "version": "0" } } }),
+            ],
+        )
+        .await;
+        assert_eq!(out[0]["error"]["code"], -32600);
+        let msg = out[0]["error"]["message"].as_str().expect("message");
+        assert!(
+            msg.contains("initialize") || msg.contains("protocol version"),
+            "{msg}"
+        );
+        assert!(
+            out[1]["result"]["protocolVersion"].is_string(),
+            "{:?}",
+            out[1]
+        );
     }
 
     /// One message per line, and a line may not contain a raw newline — the
