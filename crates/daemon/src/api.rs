@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
+use kuadrat_core::deploy::{reserve, run_reserved, Ctx, ReserveError};
 use kuadrat_core::events::StoredEvent;
 use kuadrat_core::logs::{follow, tail};
 use kuadrat_core::spec::{Route, WorkloadSpec};
@@ -232,7 +232,7 @@ fn start_deploy_locked(st: &AppState, name: &str) -> ApiResult<i64> {
     // Reserve BEFORE waiting for the slot. A duplicate deploy of a busy app is
     // knowable now, so it must be rejected now — queued behind the semaphore it
     // would sit for minutes only to be refused on reaching the front.
-    let deploy_id = reserve_deploy(st, name)?;
+    let deploy_id = reserve_deploy(st, name).map_err(reserve_api_error)?;
     spawn_reserved_deploy(st, spec, repo, deploy_id);
     Ok(deploy_id)
 }
@@ -253,9 +253,18 @@ pub(crate) fn deploy_spec(config: &AppConfig) -> ApiResult<(WorkloadSpec, std::p
 
 /// Reserve the durable row and per-app lock before any asynchronous trigger
 /// work that must be represented in the timeline.
-pub(crate) fn reserve_deploy(st: &AppState, name: &str) -> ApiResult<i64> {
+pub(crate) fn reserve_deploy(st: &AppState, name: &str) -> Result<i64, ReserveError> {
     let ctx = st.ctx();
-    reserve(&ctx, name).map_err(|e| ApiError::conflict(format!("{e:#}")))
+    reserve(&ctx, name)
+}
+
+fn reserve_api_error(err: ReserveError) -> ApiError {
+    match err {
+        ReserveError::Busy { name, .. } => {
+            ApiError::conflict(format!("another deploy of {name} is already in progress"))
+        }
+        ReserveError::Internal(err) => ApiError::internal(format!("reserving deploy: {err:#}")),
+    }
 }
 
 /// Spawn the one core deploy pipeline for an already-reserved id.

@@ -118,6 +118,7 @@ pub use run::reconcile;
 pub use run::reserve;
 pub use run::run;
 pub use run::run_reserved;
+pub use run::ReserveError;
 
 #[cfg(test)]
 mod tests {

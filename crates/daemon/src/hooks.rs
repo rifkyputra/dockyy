@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use hmac::{Hmac, Mac};
-use kuadrat_core::deploy::DeployStatus;
+use kuadrat_core::deploy::{DeployStatus, ReserveError};
 use kuadrat_core::events::EventSink;
 use kuadrat_core::exec::CommandOutput;
 use sha2::Sha256;
@@ -190,11 +190,17 @@ async fn dispatch_push(st: &AppState, app: &str, body: &[u8]) -> ApiResult<Respo
     // from changing this checkout.
     let deploy_id = match crate::api::reserve_deploy(st, app) {
         Ok(id) => id,
-        Err(err) if err.is_conflict() => {
-            record_refusal(st, app, "hook ignored: deploy in progress")?;
+        Err(ReserveError::Busy { deploy_id, .. }) => {
+            // Core already created and terminally failed this exact attempt.
+            // Add the event to it rather than inventing a second history row.
+            finish_attempt(st, deploy_id, "hook ignored: deploy in progress")?;
             return Ok(ignored("deploy in progress"));
         }
-        Err(err) => return Err(err),
+        Err(ReserveError::Internal(err)) => {
+            return Err(ApiError::internal(format!(
+                "reserving hook deploy: {err:#}"
+            )));
+        }
     };
 
     let branch = match run_git(

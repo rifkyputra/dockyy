@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result};
 
 use crate::deploy::build::build;
 use crate::deploy::detect::detect;
@@ -22,8 +22,19 @@ use crate::workloads::apply::{apply, remove};
 /// begin (invalid spec, or another deploy already holds the lock).
 pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<DeployOutcome> {
     spec.validate()?;
-    let deploy_id = reserve(ctx, &spec.name)?;
+    let deploy_id = reserve(ctx, &spec.name).map_err(anyhow::Error::new)?;
     run_reserved(ctx, spec, repo, deploy_id).await
+}
+
+/// Why a deploy could not be reserved. Busy is a caller-visible conflict and
+/// carries the already-finished attempt row; storage failures are internal and
+/// must never be mislabeled as ordinary contention.
+#[derive(Debug, thiserror::Error)]
+pub enum ReserveError {
+    #[error("another deploy of {name} is already in progress")]
+    Busy { name: String, deploy_id: i64 },
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 /// Allocate a deploy row for `name` and take its lock, without running anything.
@@ -36,7 +47,7 @@ pub async fn run(ctx: &Ctx<'_>, spec: WorkloadSpec, repo: &Path) -> Result<Deplo
 /// it back on the next start.
 ///
 /// Errors when another deploy of the same app already holds the lock.
-pub fn reserve(ctx: &Ctx<'_>, name: &str) -> Result<i64> {
+pub fn reserve(ctx: &Ctx<'_>, name: &str) -> std::result::Result<i64, ReserveError> {
     let deploy_id = ctx.store.create_deploy(name)?;
     if !ctx.store.acquire_lock(name, deploy_id)? {
         ctx.store.finish_deploy(
@@ -44,7 +55,10 @@ pub fn reserve(ctx: &Ctx<'_>, name: &str) -> Result<i64> {
             DeployStatus::Failed,
             Some("another deploy is already in progress"),
         )?;
-        bail!("another deploy of {name} is already in progress");
+        return Err(ReserveError::Busy {
+            name: name.to_string(),
+            deploy_id,
+        });
     }
     Ok(deploy_id)
 }
@@ -441,6 +455,30 @@ mod tests {
                 sink,
             }
         }
+    }
+
+    #[test]
+    fn a_busy_reservation_reports_the_attempt_it_finished() {
+        let h = harness_ok();
+        let first = h.store.create_deploy("web").expect("first row");
+        assert!(h.store.acquire_lock("web", first).expect("first lock"));
+        let sink = NullSink;
+
+        let err = reserve(&h.ctx(&sink), "web").expect_err("busy");
+        let attempt_id = match err {
+            ReserveError::Busy { name, deploy_id } => {
+                assert_eq!(name, "web");
+                deploy_id
+            }
+            ReserveError::Internal(err) => panic!("unexpected internal error: {err:#}"),
+        };
+        let attempt = h
+            .store
+            .deploy(attempt_id)
+            .expect("read attempt")
+            .expect("attempt row");
+        assert_eq!(attempt.status, DeployStatus::Failed);
+        assert!(attempt.detail.as_deref().unwrap_or("").contains("progress"));
     }
 
     /// Every stage succeeds; the deploy reaches Done.
