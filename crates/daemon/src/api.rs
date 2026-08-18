@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use kuadrat_core::deploy::{reserve, run_reserved, Ctx};
 use kuadrat_core::events::StoredEvent;
 use kuadrat_core::logs::{follow, tail};
-use kuadrat_core::spec::Route;
+use kuadrat_core::spec::{Route, WorkloadSpec};
 use kuadrat_core::store::AppConfig;
 use kuadrat_core::workloads::query::status;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
+        .route("/hooks/github/:app", post(crate::hooks::github))
+        .route("/hooks/gitlab/:app", post(crate::hooks::gitlab))
         .route("/api/reconcile", post(reconcile_api))
         .route("/api/apps/:name/logs", get(logs))
         .route("/api/apps/:name/logs/stream", get(logs_stream))
@@ -146,11 +148,15 @@ async fn register(
         repo_path: req.repo_path,
         route: req.route,
     };
+    // A hook carries one registration snapshot from branch check through
+    // reset and reservation. Do not let this endpoint swap the repo midway.
+    let _trigger = st.trigger_lock.lock().await;
     // register_app rejects a relative repo_path and a name/slug collision; both
     // are the caller's mistake, so both are 400 rather than 500.
     st.store
         .register_app(&config)
         .map_err(ApiError::bad_request)?;
+    drop(_trigger);
 
     Ok((StatusCode::CREATED, Json(summarise(&st, config).await)))
 }
@@ -171,14 +177,19 @@ async fn deploy(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let config = registration(&st, &name)?;
+    let deploy_id = start_deploy(&st, &name).await?;
 
-    // "This app is already deploying" outranks anything wrong with the spec:
-    // while a deploy is in flight the request cannot proceed whatever the spec
-    // says, and a 400 telling the operator to fix a kuadrat.json would send
-    // them after the wrong problem. `reserve` re-checks atomically below — this
-    // read only fixes which error the caller sees, not whether two deploys can
-    // start.
+    if wants_html(&headers) {
+        Ok(Redirect::to(&format!("/deploy/{deploy_id}")).into_response())
+    } else {
+        Ok((StatusCode::OK, Json(DeployAccepted { deploy_id })).into_response())
+    }
+}
+
+/// Reject an app that already has an in-flight deploy. Hooks call this before
+/// changing the checkout; [`start_deploy`] repeats it and `reserve` remains the
+/// atomic correctness backstop if another request wins the race.
+pub(crate) fn ensure_not_busy(st: &AppState, name: &str) -> ApiResult<()> {
     let busy = st
         .store
         .in_progress_deploys()
@@ -190,9 +201,46 @@ async fn deploy(
             "another deploy of {name} is already in progress"
         )));
     }
+    Ok(())
+}
 
+/// Accept and spawn one deploy. The button, API clients, and inbound hooks all
+/// cross this exact path so registration, validation, reservation, and global
+/// serialization cannot drift between trigger surfaces.
+pub(crate) async fn start_deploy(st: &AppState, name: &str) -> ApiResult<i64> {
+    let _trigger = st.trigger_lock.lock().await;
+    start_deploy_locked(st, name)
+}
+
+/// The shared deploy path while the caller holds `trigger_lock`. Hooks reserve
+/// before network I/O so a failed fetch has a durable timeline entry; after a
+/// successful reset they call the same spec/reserve/spawn building blocks
+/// below with that pre-reserved id.
+fn start_deploy_locked(st: &AppState, name: &str) -> ApiResult<i64> {
+    let config = registration(st, name)?;
+
+    // "This app is already deploying" outranks anything wrong with the spec:
+    // while a deploy is in flight the request cannot proceed whatever the spec
+    // says, and a 400 telling the operator to fix a kuadrat.json would send
+    // them after the wrong problem. `reserve` re-checks atomically below — this
+    // read only fixes which error the caller sees, not whether two deploys can
+    // start.
+    ensure_not_busy(st, name)?;
+
+    let (spec, repo) = deploy_spec(&config)?;
+
+    // Reserve BEFORE waiting for the slot. A duplicate deploy of a busy app is
+    // knowable now, so it must be rejected now — queued behind the semaphore it
+    // would sit for minutes only to be refused on reaching the front.
+    let deploy_id = reserve_deploy(st, name)?;
+    spawn_reserved_deploy(st, spec, repo, deploy_id);
+    Ok(deploy_id)
+}
+
+/// Load and validate the spec from one registration snapshot.
+pub(crate) fn deploy_spec(config: &AppConfig) -> ApiResult<(WorkloadSpec, std::path::PathBuf)> {
     let repo = std::path::PathBuf::from(&config.repo_path);
-    let spec = spec_for(&config, |p| std::fs::read_to_string(p).ok())
+    let spec = spec_for(config, |p| std::fs::read_to_string(p).ok())
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     // Fail the obviously-invalid spec here, where it can be a 400, rather than
     // inside the deploy where it would only be visible as a failed run. A route
@@ -200,15 +248,23 @@ async fn deploy(
     // domain field the operator just edited.
     spec.validate()
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    Ok((spec, repo))
+}
 
-    // Reserve BEFORE waiting for the slot. A duplicate deploy of a busy app is
-    // knowable now, so it must be rejected now — queued behind the semaphore it
-    // would sit for minutes only to be refused on reaching the front.
-    let deploy_id = {
-        let ctx = st.ctx();
-        reserve(&ctx, &name).map_err(|e| ApiError::conflict(format!("{e:#}")))?
-    };
+/// Reserve the durable row and per-app lock before any asynchronous trigger
+/// work that must be represented in the timeline.
+pub(crate) fn reserve_deploy(st: &AppState, name: &str) -> ApiResult<i64> {
+    let ctx = st.ctx();
+    reserve(&ctx, name).map_err(|e| ApiError::conflict(format!("{e:#}")))
+}
 
+/// Spawn the one core deploy pipeline for an already-reserved id.
+pub(crate) fn spawn_reserved_deploy(
+    st: &AppState,
+    spec: WorkloadSpec,
+    repo: std::path::PathBuf,
+    deploy_id: i64,
+) {
     let bg = st.clone();
     tokio::spawn(async move {
         // One deploy at a time, globally. The permit is held for the whole run
@@ -221,12 +277,6 @@ async fn deploy(
         let ctx = bg.ctx();
         let _ = run_reserved(&ctx, spec, &repo, deploy_id).await;
     });
-
-    if wants_html(&headers) {
-        Ok(Redirect::to(&format!("/deploy/{deploy_id}")).into_response())
-    } else {
-        Ok((StatusCode::OK, Json(DeployAccepted { deploy_id })).into_response())
-    }
 }
 
 /// `POST /apps`: the operator's registration form, distinct from the JSON
@@ -239,6 +289,7 @@ async fn register_form(State(st): State<AppState>, Form(req): Form<RegisterReque
         repo_path: req.repo_path,
         route: req.route,
     };
+    let _trigger = st.trigger_lock.lock().await;
     match st.store.register_app(&config) {
         Ok(()) => Redirect::to(&format!(
             "/app/{}",

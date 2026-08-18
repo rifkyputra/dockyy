@@ -9,8 +9,9 @@ use kuadrat_core::fs::FileSystem;
 use kuadrat_core::spec::WorkloadSpec;
 use kuadrat_core::store::{AppConfig, Store};
 use kuadrat_core::workloads::paths::Paths;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 
+use crate::hooks::HookSecret;
 use crate::hub::BroadcastSink;
 
 /// Everything a handler needs. Cloned per request; every field is an `Arc` or
@@ -25,6 +26,13 @@ pub struct AppState {
     pub hub: Arc<BroadcastSink>,
     pub store: Arc<Store>,
     pub paths: Paths,
+    /// Shared inbound-hook secret. `None` means the hook routes answer 404.
+    pub hook_secret: Option<Arc<HookSecret>>,
+    /// Serializes every operation that can change a registration, mutate a
+    /// registered checkout, or reserve a deploy. The deploy itself runs after
+    /// this guard is released; its durable in-progress row then prevents a
+    /// later hook from changing the checkout underneath it.
+    pub trigger_lock: Arc<Mutex<()>>,
     /// One permit, globally: one deploy at a time.
     ///
     /// RAM is the binding constraint on these hosts and `podman build` is the
@@ -47,6 +55,8 @@ impl AppState {
             hub: Arc::new(BroadcastSink::new()),
             store,
             paths,
+            hook_secret: None,
+            trigger_lock: Arc::new(Mutex::new(())),
             deploy_slot: Arc::new(Semaphore::new(1)),
         }
     }

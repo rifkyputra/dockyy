@@ -17,11 +17,17 @@ impl ApiError {
     pub fn bad_request(msg: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::BAD_REQUEST, msg)
     }
+    pub fn unauthorized(msg: impl std::fmt::Display) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, msg)
+    }
     pub fn conflict(msg: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::CONFLICT, msg)
     }
     pub fn internal(msg: impl std::fmt::Display) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, msg)
+    }
+    pub(crate) fn is_conflict(&self) -> bool {
+        self.0 == StatusCode::CONFLICT
     }
 }
 

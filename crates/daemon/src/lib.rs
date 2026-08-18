@@ -44,12 +44,15 @@ pub async fn serve(config: Config) -> Result<()> {
     };
     let store = Arc::new(Store::open(&paths.db_path)?);
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         Arc::new(LocalExecutor),
         Arc::new(LocalFileSystem),
         store,
         paths,
     );
+    state.hook_secret = hooks::HookSecret::from_env()
+        .context("loading inbound hook secret")?
+        .map(Arc::new);
 
     let recovered = reconcile(&state.ctx())
         .await
