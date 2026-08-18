@@ -10,6 +10,7 @@ pub mod api;
 pub mod assets;
 pub mod config;
 pub mod error;
+pub mod hooks;
 pub mod hub;
 pub mod pages;
 pub mod state;

@@ -18,6 +18,11 @@ maud = { version = "0.26", features = ["axum"] }
 # declaring it directly adds a dependency edge, not a new crate, per `cargo
 # tree -i percent-encoding`.
 percent-encoding = "2.3"
+# Phase 6's two new crates, and the only ones: HMAC-SHA256 for inbound
+# webhook signatures. std has no SHA-256, and shelling to openssl would put
+# the secret on argv — the exact leak the _FILE pattern exists to prevent.
+sha2 = "0.10"
+hmac = "0.12"
 
 [dev-dependencies]
 tempfile.workspace = true
