@@ -11,8 +11,11 @@ path = "src/main.rs"
 [dependencies]
 kuadrat-core = { path = "../core" }
 kuadrat-daemon = { path = "../daemon" }
+kuadrat-mcp = { path = "../mcp" }
 anyhow.workspace = true
-tokio.workspace = true
+# `io-std` here only: the MCP subcommand reads stdin/writes stdout async;
+# nothing else in the workspace touches tokio::io::{stdin,stdout}.
+tokio = { workspace = true, features = ["io-std"] }
 clap.workspace = true
 serde_json.workspace = true
 

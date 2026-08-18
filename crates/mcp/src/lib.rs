@@ -7,6 +7,8 @@ pub mod daemon;
 pub mod rpc;
 pub mod tools;
 
+pub use daemon::{probe, CurlDaemon};
+
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 

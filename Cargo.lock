@@ -449,6 +449,7 @@ dependencies = [
  "clap",
  "kuadrat-core",
  "kuadrat-daemon",
+ "kuadrat-mcp",
  "serde_json",
  "tempfile",
  "tokio",

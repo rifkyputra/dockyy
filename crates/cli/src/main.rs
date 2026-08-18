@@ -68,6 +68,15 @@ enum Command {
         #[arg(long, default_value_t = args::default_listen())]
         listen: std::net::SocketAddr,
     },
+    /// Speak MCP over stdio for an agent, operating the daemon at --listen.
+    /// Refuses to start when no daemon answers: an agent cannot see a
+    /// fallback message, so a silent second code path would let it report
+    /// deploys the daemon's timeline does not contain.
+    Mcp {
+        /// The daemon's address — the same default `kuadrat serve` binds.
+        #[arg(long, default_value_t = args::default_listen())]
+        listen: std::net::SocketAddr,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,6 +231,21 @@ async fn main() -> Result<()> {
                 listen,
                 root: cli.root,
             })
+            .await?;
+        }
+        Command::Mcp { listen } => {
+            let daemon = kuadrat_mcp::CurlDaemon { listen };
+            if let Err(e) = kuadrat_mcp::probe(&daemon).await {
+                // stderr, never stdout: on stdio, stdout carries only MCP
+                // messages.
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+            kuadrat_mcp::serve(
+                &daemon,
+                tokio::io::BufReader::new(tokio::io::stdin()),
+                tokio::io::stdout(),
+            )
             .await?;
         }
         Command::Reconcile => {
