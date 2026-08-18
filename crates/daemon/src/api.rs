@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps", get(list_apps).post(register))
         .route("/api/apps/:name", get(get_app))
         .route("/api/apps/:name/deploy", post(deploy))
+        .route("/api/reconcile", post(reconcile_api))
         .route("/api/apps/:name/logs", get(logs))
         .route("/api/apps/:name/logs/stream", get(logs_stream))
         .route("/api/deploys/:id", get(get_deploy))
@@ -301,6 +302,32 @@ async fn logs_stream(State(st): State<AppState>, Path(name): Path<String>) -> Ap
 /// One line on the wire, as JSON.
 fn line_event(line: &str) -> String {
     serde_json::to_string(&serde_json::json!({ "line": line })).expect("a string serializes")
+}
+
+#[derive(Serialize)]
+pub struct ReconcileOut {
+    pub reconciled: Vec<String>,
+}
+
+/// Roll back deploys stranded by a crash — through the daemon, so an agent
+/// (the MCP surface) can reach recovery without a second code path. Waits for
+/// the deploy slot: holding the only permit is the proof that no deploy is
+/// mid-flight in this process, so nothing live can be mistaken for stranded.
+/// The CLI's in-process reconcile needs no such guard because it is only
+/// correct to use when no daemon runs.
+async fn reconcile_api(State(st): State<AppState>) -> ApiResult<Json<ReconcileOut>> {
+    let _permit = st
+        .deploy_slot
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal("shutting down".to_string()))?;
+    let ctx = st.ctx();
+    let outcomes = kuadrat_core::deploy::reconcile(&ctx)
+        .await
+        .map_err(|e| ApiError::internal(format!("reconcile: {e:#}")))?;
+    Ok(Json(ReconcileOut {
+        reconciled: outcomes.iter().map(|o| format!("{o:?}")).collect(),
+    }))
 }
 
 async fn get_deploy(
@@ -760,6 +787,19 @@ pub(crate) mod tests {
             .expect("send");
         assert_eq!(res.status(), StatusCode::OK);
         assert!(body_json(res).await.get("deploy_id").is_some());
+    }
+
+    /// The MCP surface's recovery path: reconcile through the daemon. With
+    /// nothing stranded it is a no-op that says so — an empty list, not an
+    /// absent field, so an agent can tell "nothing to do" from "no answer".
+    /// (A stranded row mid-rollback is core's own reconcile coverage; the
+    /// harness cannot seed one without running a real deploy.)
+    #[tokio::test]
+    async fn reconcile_with_nothing_stranded_returns_an_empty_list() {
+        let (app, _store, _d) = harness();
+        let res = app.oneshot(post("/api/reconcile")).await.expect("send");
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["reconciled"], serde_json::json!([]));
     }
 
     #[tokio::test]
