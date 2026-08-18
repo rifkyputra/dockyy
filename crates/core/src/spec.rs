@@ -47,6 +47,23 @@ pub struct WorkloadSpec {
     pub health_cmd: Option<String>,
     pub restart_policy: RestartPolicy,
     pub route: Option<Route>,
+    /// Commands run on a schedule in a fresh container from this image —
+    /// systemd timers, not a cron dialect. `#[serde(default)]` so every
+    /// pre-phase-6 kuadrat.json still parses.
+    #[serde(default)]
+    pub tasks: Vec<ScheduledTask>,
+}
+
+/// One scheduled command: a systemd `OnCalendar` expression and what to run.
+/// Runs in a fresh container from the app's image with its env and secrets —
+/// never an `exec` into the running app, so it works whether the app is up,
+/// crashed, or mid-deploy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledTask {
+    pub name: String,
+    /// A systemd `OnCalendar` expression (`daily`, `*-*-* 03:00:00`, …).
+    pub schedule: String,
+    pub command: Vec<String>,
 }
 
 impl WorkloadSpec {
@@ -117,6 +134,31 @@ impl WorkloadSpec {
             single_line("route domain", &route.domain)?;
         }
 
+        let mut task_slugs = std::collections::HashSet::new();
+        for task in &self.tasks {
+            if slug(&task.name).is_empty() {
+                bail!(
+                    "task name {:?} yields an empty identifier; it needs at least one \
+                     letter or digit",
+                    task.name
+                );
+            }
+            if !task_slugs.insert(slug(&task.name)) {
+                bail!("duplicate task name {:?}", task.name);
+            }
+            single_line(&format!("task {:?} name", task.name), &task.name)?;
+            if task.schedule.trim().is_empty() {
+                bail!("task {:?} has an empty schedule", task.name);
+            }
+            single_line(&format!("task {:?} schedule", task.name), &task.schedule)?;
+            if task.command.is_empty() {
+                bail!("task {:?} has an empty command", task.name);
+            }
+            for (i, word) in task.command.iter().enumerate() {
+                single_line(&format!("task {:?} command[{i}]", task.name), word)?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -146,6 +188,63 @@ pub fn slug(name: &str) -> String {
         out.pop();
     }
     out
+}
+
+#[cfg(test)]
+mod tests_tasks {
+    use super::*;
+
+    /// The compat property `#[serde(default)]` exists for: a kuadrat.json
+    /// written before phase 6 has no `tasks` key and must keep parsing.
+    /// (The other fields have never been optional — build the fixture from a
+    /// real spec minus the one key, not from a minimal JSON that never
+    /// parsed in any version.)
+    #[test]
+    fn a_spec_without_tasks_still_parses_and_validates() {
+        let mut v = serde_json::to_value(WorkloadSpec::new("web", "i")).expect("to_value");
+        v.as_object_mut().expect("object").remove("tasks");
+        let spec: WorkloadSpec =
+            serde_json::from_value(v).expect("a pre-phase-6 spec must still parse");
+        assert!(spec.tasks.is_empty());
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn duplicate_task_names_are_rejected() {
+        let mut spec = WorkloadSpec::new("web", "img");
+        for _ in 0..2 {
+            spec.tasks.push(ScheduledTask {
+                name: "cleanup".into(),
+                schedule: "daily".into(),
+                command: vec!["true".into()],
+            });
+        }
+        let err = spec.validate().unwrap_err();
+        assert!(err.to_string().contains("cleanup"), "{err}");
+    }
+
+    #[test]
+    fn a_task_schedule_with_a_newline_is_rejected() {
+        let mut spec = WorkloadSpec::new("web", "img");
+        spec.tasks.push(ScheduledTask {
+            name: "t".into(),
+            schedule: "daily\nExec=evil".into(),
+            command: vec!["true".into()],
+        });
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn a_task_with_no_command_is_rejected() {
+        let mut spec = WorkloadSpec::new("web", "img");
+        spec.tasks.push(ScheduledTask {
+            name: "t".into(),
+            schedule: "daily".into(),
+            command: vec![],
+        });
+        let err = spec.validate().unwrap_err();
+        assert!(err.to_string().contains("command"), "{err}");
+    }
 }
 
 #[cfg(test)]
