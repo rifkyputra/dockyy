@@ -79,7 +79,7 @@ so it cannot drift).
 - `validate()` extended: per task — name slug non-empty, names unique per spec, `schedule`
   single-line and non-empty, `command` non-empty and every word single-line
 
-- [ ] **Step 1: Failing tests** in `spec.rs`'s test module:
+- [x] **Step 1: Failing tests** in `spec.rs`'s test module:
 
 ```rust
     #[test]
@@ -127,12 +127,12 @@ so it cannot drift).
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail** (no `ScheduledTask`, no field)
-- [ ] **Step 3: Implement** — the struct; the field; in `validate()`, after the existing checks:
+- [x] **Step 2: Run to verify they fail** (no `ScheduledTask`, no field)
+- [x] **Step 3: Implement** — the struct; the field; in `validate()`, after the existing checks:
   slug/uniqueness (a `HashSet` over `slug(&t.name)`), `single_line` on name/schedule/each word,
   non-empty checks. Error messages name the task and field, never values (the house rule).
-- [ ] **Step 4: Suite** — expected core **206** (202 + 4). `make check` clean.
-- [ ] **Step 5: Commit** — `feat(core): scheduled tasks on the spec`
+- [x] **Step 4: Suite** — expected core **206** (202 + 4). `make check` clean.
+- [x] **Step 5: Commit** — `feat(core): scheduled tasks on the spec`
 
 ---
 
@@ -151,7 +151,7 @@ so it cannot drift).
 - `pub fn render_timer(spec: &WorkloadSpec, task: &ScheduledTask) -> String` — marker,
   `[Timer] OnCalendar=… Persistent=true`, `[Install] WantedBy=timers.target`
 
-- [ ] **Step 1: Failing tests** — golden-file style, matching the module's existing pattern:
+- [x] **Step 1: Failing tests** — golden-file style, matching the module's existing pattern:
 
 ```rust
     #[test]
@@ -183,12 +183,12 @@ so it cannot drift).
     fn rendered_task_files_always_carry_the_managed_marker() { /* both renderers */ }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
-- [ ] **Step 3: Implement** — reuse `render`'s escaping/quoting helpers (`escape_percent`,
+- [x] **Step 2: Run to verify they fail**
+- [x] **Step 3: Implement** — reuse `render`'s escaping/quoting helpers (`escape_percent`,
   `quote_word`); write the two golden files by hand first, from the design. The `.timer` needs
   no escaping beyond the marker + validated single-line schedule.
-- [ ] **Step 4: Suite** — expected core **210** (206 + 4). `make check` clean.
-- [ ] **Step 5: Commit** — `feat(core): render scheduled tasks as oneshot containers and timers`
+- [x] **Step 4: Suite** — expected core **210** (206 + 4). `make check` clean.
+- [x] **Step 5: Commit** — `feat(core): render scheduled tasks as oneshot containers and timers`
 
 ---
 
@@ -215,7 +215,7 @@ Behavior, in `apply` after the main unit's write and before `daemon-reload`:
 In `remove`: prune ALL of the app's task units (same scan, empty keep-set) before the
 existing unit removal; `disable --now` their timers first.
 
-- [ ] **Step 1: Failing tests** (FakeExecutor + FakeFileSystem, existing harness style):
+- [x] **Step 1: Failing tests** (FakeExecutor + FakeFileSystem, existing harness style):
 
 ```rust
     #[tokio::test]
@@ -240,10 +240,10 @@ existing unit removal; `disable --now` their timers first.
         gone; disable --now called before stop */ }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
-- [ ] **Step 3: Implement** per the behavior list. Keep one `daemon-reload`.
-- [ ] **Step 4: Suite** — expected core **215** (210 + 5). `make check` clean.
-- [ ] **Step 5: Commit** — `feat(core): apply, prune, and remove scheduled tasks`
+- [x] **Step 2: Run to verify they fail**
+- [x] **Step 3: Implement** per the behavior list. Keep one `daemon-reload`.
+- [x] **Step 4: Suite** — expected core **215** (210 + 5). `make check` clean.
+- [x] **Step 5: Commit** — `feat(core): apply, prune, and remove scheduled tasks`
 
 ---
 
@@ -272,7 +272,7 @@ sha2 = "0.10"
 hmac = "0.12"
 ```
 
-- [ ] **Step 1: Failing tests** in `hooks.rs`:
+- [x] **Step 1: Failing tests** in `hooks.rs`:
 
 ```rust
     fn secret() -> HookSecret { HookSecret::for_tests("s3cret") }
@@ -304,11 +304,11 @@ hmac = "0.12"
 `HookSecret::for_tests` is `#[cfg(test)]`-gated so no production path constructs one from a
 literal.
 
-- [ ] **Step 2: Run to verify they fail**
-- [ ] **Step 3: Implement** — `Hmac::<Sha256>::new_from_slice`; hex-decode without a new crate
+- [x] **Step 2: Run to verify they fail**
+- [x] **Step 3: Implement** — `Hmac::<Sha256>::new_from_slice`; hex-decode without a new crate
   (a 10-line `fn from_hex`); equality via `hmac(k, a) == hmac(k, b)` on both paths.
-- [ ] **Step 4: Suite** — expected daemon **96** (91 + 5). `make check` clean.
-- [ ] **Step 5: Commit** — `feat(daemon): webhook signature verification`
+- [x] **Step 4: Suite** — expected daemon **96** (91 + 5). `make check` clean.
+- [x] **Step 5: Commit** — `feat(daemon): webhook signature verification`
 
 ---
 
@@ -336,7 +336,7 @@ busy (from `start_deploy`'s 409) → 200 `{"ignored":"deploy in progress"}` ·
 `git fetch origin` then `git reset --hard <sha>` (via `st.exec`, in the repo dir; failure →
 500, no deploy) · `start_deploy` → 200 `{"deploy_id":N}`.
 
-- [ ] **Step 1: Failing tests** (api.rs or hooks.rs test module, existing harness + FakeExecutor;
+- [x] **Step 1: Failing tests** (api.rs or hooks.rs test module, existing harness + FakeExecutor;
   the harness env must inject a secret — give `harness_parts` a variant or set the state's
   `hook_secret` directly on the built state):
 
@@ -364,12 +364,12 @@ busy (from `start_deploy`'s 409) → 200 `{"ignored":"deploy in progress"}` ·
     async fn a_gitlab_push_with_the_right_token_deploys() { /* X-Gitlab-Token path */ }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
-- [ ] **Step 3: Implement** — extract `start_deploy` first (a pure refactor; the existing 91
+- [x] **Step 2: Run to verify they fail**
+- [x] **Step 3: Implement** — extract `start_deploy` first (a pure refactor; the existing 91
   daemon tests are its net), then the handlers.
-- [ ] **Step 4: Suite** — expected daemon **101** (96 + 5), everything else unchanged.
+- [x] **Step 4: Suite** — expected daemon **101** (96 + 5), everything else unchanged.
   `make check` clean.
-- [ ] **Step 5: Commit** — `feat(daemon): push-to-deploy hooks for GitHub and GitLab`
+- [x] **Step 5: Commit** — `feat(daemon): push-to-deploy hooks for GitHub and GitLab`
 
 ---
 
@@ -377,7 +377,7 @@ busy (from `start_deploy`'s 409) → 200 `{"ignored":"deploy in progress"}` ·
 
 **Files:** Modify: `README.md`, `docs/known-gaps.md`
 
-- [ ] **Step 1: README** — "What it does" gains push-to-deploy + scheduled tasks lines; the
+- [x] **Step 1: README** — "What it does" gains push-to-deploy + scheduled tasks lines; the
   spec reference gains `tasks`; a "### Push to deploy" section: the env pair, the forge-side
   webhook URL (`https://<your-ingress>/hooks/github/<app>`), and the Caddy exposure block:
 
@@ -388,30 +388,39 @@ hooks.example.com {
 ```
 
   with the sentence that the daemon itself stays loopback and the signature is the auth.
-- [ ] **Step 2: known-gaps** — three entries: no hook queue/debounce (a push during a deploy is
+- [x] **Step 2: known-gaps** — three entries: no hook queue/debounce (a push during a deploy is
   ignored with a reason; redeliver); Gitea speaks the GitHub shape but is untested and
   unclaimed; task runs report only through systemd/journal (`list-timers` + `tail_logs`), no
   kuadrat-side run history.
-- [ ] **Step 3: Full gauntlet** — `cargo test --workspace` (expected: cli 30, core 215,
+- [x] **Step 3: Full gauntlet** — `cargo test --workspace` (expected: cli 30, core 215,
   daemon 101, mcp 22 = **368**), `make check`, no-PreEscaped grep, adblock-bait scan on any
   new DOM (none expected — no UI in this phase).
-- [ ] **Step 4: Commit** — `docs: record push-to-deploy and scheduled tasks`
+- [x] **Step 4: Commit** — `docs: record push-to-deploy and scheduled tasks`
 
 ---
 
 ## Completion checklist
 
-- [ ] `cargo test --workspace`: cli 30, core 215, daemon 101, mcp 22 — 0 failed
-- [ ] `make check` clean
-- [ ] Two new dependencies, daemon only (`sha2`, `hmac`) — `git diff f2c8143 -- '**/Cargo.toml'` shows nothing else
-- [ ] A tampered/unsigned hook runs no git command — proven by a test
-- [ ] No secret configured → hook routes 404 — proven by a test
-- [ ] The reset uses the payload SHA — proven by a test
-- [ ] An invalid `OnCalendar` fails before any file is written — proven by a test
-- [ ] A foreign file at a task path is refused, not deleted — proven by a test
-- [ ] `remove` cleans up task timers and containers — proven by a test
-- [ ] The hook path and the button share one `start_deploy`
-- [ ] Secret never on argv, never in a response body
+> Closed 2026-08-18, verified on sumo. Measured: cli 30, core 215, daemon **106**, mcp 22 —
+> **373 total, 0 failed**. Daemon landed 5 tests over plan: the hook implementation grew four
+> hardenings beyond this document — hook git failures reserve a deploy id first so they land as
+> durable timeline events; git stderr never reaches a response (it can echo credential-bearing
+> remote URLs); a trigger lock serializes check/reset/reserve across concurrent deliveries; and
+> `run_git` carries a 30-second server-side deadline. `parse_push` also validates the SHA as
+> 40/64 hex. Dependency diff since `f2c8143`: exactly `crates/daemon/Cargo.toml` +5 lines
+> (`sha2`, `hmac`, comment) — verified with `git diff f2c8143 -- '**/Cargo.toml'`.
+
+- [x] `cargo test --workspace`: cli 30, core 215, daemon 101, mcp 22 — measured: daemon 106, rest as planned, 0 failed
+- [x] `make check` clean
+- [x] Two new dependencies, daemon only (`sha2`, `hmac`) — `git diff f2c8143 -- '**/Cargo.toml'` shows nothing else
+- [x] A tampered/unsigned hook runs no git command — proven by a test
+- [x] No secret configured → hook routes 404 — proven by a test
+- [x] The reset uses the payload SHA — proven by a test
+- [x] An invalid `OnCalendar` fails before any file is written — proven by a test
+- [x] A foreign file at a task path is refused, not deleted — proven by a test
+- [x] `remove` cleans up task timers and containers — proven by a test
+- [x] The hook path and the button share one `start_deploy`
+- [x] Secret never on argv, never in a response body
 
 ## Not in this group
 
