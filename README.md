@@ -314,8 +314,9 @@ variable, nor the URL itself, ever reaches argv — see `crates/daemon/src/webho
 
 ## Design principles
 
-- **systemd is the orchestrator.** kuadrat does not supervise, restart, or schedule — systemd
-  already does. Adding a second supervisor is the problem, not the solution.
+- **systemd is the orchestrator.** kuadrat renders restart policies and timers, but runs no
+  supervisor or scheduler of its own — systemd already does. Adding a second one is the problem,
+  not the solution.
 - **The spec is the source of truth.** Unit files are derived artifacts kuadrat owns and may
   overwrite. Rollback is re-applying a previous spec, not diffing files.
 - **The core never touches the network.** `kuadrat-core` manipulates the local filesystem,
@@ -326,10 +327,11 @@ variable, nor the URL itself, ever reaches argv — see `crates/daemon/src/webho
 
 ## Scope
 
-**v1:** deploy loop, secrets, logs, web UI, MCP surface, event stream.
+**v1:** deploy loop, secrets, logs, web UI, MCP surface, event stream, signed GitHub/GitLab
+push-to-deploy hooks, and spec-declared scheduled tasks on systemd timers.
 
-**Not in v1:** multi-host orchestration, blue/green deploys, push-to-deploy webhooks,
-notification delivery, metrics, backups, autonomous agent action.
+**Not in v1:** multi-host orchestration, blue/green deploys, notification delivery, metrics,
+backups, preview deployments, or autonomous agent action.
 
 ## Requirements
 
@@ -348,6 +350,8 @@ UI from elsewhere is the operator's job via SSH tunnel or VPN.
 | [Phase 2 design](docs/design/2026-08-10-phase-2-deploy-loop.md) | The deploy loop: state machine, gateway, secrets, store, events |
 | [Phase 3 design](docs/design/2026-08-11-phase-3-daemon-and-surfaces.md) | The daemon: HTTP API, SSE, htmx UI, logs, webhook |
 | [Phase 4 design](docs/design/2026-08-11-phase-4-live-logs.md) | The streaming seam and live log tailing |
+| [Phase 5 design](docs/design/2026-08-13-phase-5-mcp-surface.md) | The daemon-backed MCP agent surface |
+| [Phase 6 design](docs/design/2026-08-18-phase-6-push-and-timers.md) | Signed push-to-deploy hooks and systemd-native scheduled tasks |
 | [Examples](examples/) | A runnable app, its Docker equivalent, and the runtime benchmark |
 | [Plans](docs/plans/) | Per-gate implementation plans, task by task |
 | [Known gaps](docs/known-gaps.md) | Deferred findings, acceptance records, what to re-read before which phase |

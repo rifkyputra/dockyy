@@ -320,8 +320,10 @@ literal.
 **Interfaces:**
 - `api.rs`: the deploy handler's guts become
   `pub(crate) async fn start_deploy(st: &AppState, name: &str) -> Result<i64, ApiError>`
-  (busy-check → registration → spec load → validate → reserve → spawn); the `deploy` handler
-  and both hook handlers call it. The handler's HTML/JSON branch stays in the handler.
+  (busy-check → registration → spec load → validate → reserve → spawn). The hook uses the same
+  spec/reserve/spawn building blocks but reserves before git network I/O, so fetch/reset failures
+  have a durable attempt id and no competing trigger can mutate the checkout. The handler's
+  HTML/JSON branch stays in the handler.
 - `state.rs`: `pub hook_secret: Option<Arc<HookSecret>>` on `AppState`; `lib.rs` loads it via
   `HookSecret::from_env()` at startup (a bad `_FILE` path is a startup error, like the webhook).
 - `hooks.rs`: axum handlers `github(State, Path(app), HeaderMap, Bytes)` and
@@ -331,10 +333,11 @@ literal.
 Handler flow (both, differing only in the verify call), exactly the design's ladder:
 no secret → 404 · bad signature/token → 401 (empty-ish body: `{"error":"unauthorized"}`) ·
 unregistered app → 404 · `parse_push` None → 200 `{"ignored":"not a branch push"}` ·
-branch ≠ `git -C <repo> symbolic-ref --short HEAD` (via `st.exec`) → 200 `{"ignored":…}` ·
-busy (from `start_deploy`'s 409) → 200 `{"ignored":"deploy in progress"}` ·
-`git fetch origin` then `git reset --hard <sha>` (via `st.exec`, in the repo dir; failure →
-500, no deploy) · `start_deploy` → 200 `{"deploy_id":N}`.
+busy → durable failed attempt + 200 `{"ignored":"deploy in progress"}` · reserve the attempt ·
+branch ≠ `git -C <repo> symbolic-ref --short HEAD` (via `st.exec`) → durable ignored attempt +
+200 `{"ignored":…}` · `git fetch origin` then `git reset --hard <sha>` (via `st.exec`, in the
+repo dir; failure → durable failed attempt + 500) · shared spec validation/spawn →
+200 `{"deploy_id":N}`.
 
 - [x] **Step 1: Failing tests** (api.rs or hooks.rs test module, existing harness + FakeExecutor;
   the harness env must inject a secret — give `harness_parts` a variant or set the state's
@@ -365,8 +368,9 @@ busy (from `start_deploy`'s 409) → 200 `{"ignored":"deploy in progress"}` ·
 ```
 
 - [x] **Step 2: Run to verify they fail**
-- [x] **Step 3: Implement** — extract `start_deploy` first (a pure refactor; the existing 91
-  daemon tests are its net), then the handlers.
+- [x] **Step 3: Implement** — extract the shared deploy preparation/reservation/spawn path first
+  (a pure refactor; the existing 91 daemon tests are its net), then the handlers. Final hardening
+  reserves hook attempts before git and serializes trigger/registration changes.
 - [x] **Step 4: Suite** — expected daemon **101** (96 + 5), everything else unchanged.
   `make check` clean.
 - [x] **Step 5: Commit** — `feat(daemon): push-to-deploy hooks for GitHub and GitLab`
@@ -401,16 +405,16 @@ hooks.example.com {
 
 ## Completion checklist
 
-> Closed 2026-08-18, verified on sumo. Measured: cli 30, core 215, daemon **106**, mcp 22 —
-> **373 total, 0 failed**. Daemon landed 5 tests over plan: the hook implementation grew four
-> hardenings beyond this document — hook git failures reserve a deploy id first so they land as
-> durable timeline events; git stderr never reaches a response (it can echo credential-bearing
-> remote URLs); a trigger lock serializes check/reset/reserve across concurrent deliveries; and
-> `run_git` carries a 30-second server-side deadline. `parse_push` also validates the SHA as
-> 40/64 hex. Dependency diff since `f2c8143`: exactly `crates/daemon/Cargo.toml` +5 lines
-> (`sha2`, `hmac`, comment) — verified with `git diff f2c8143 -- '**/Cargo.toml'`.
+> Closed 2026-08-18, verified on sumo. Measured: cli 30, core **216**, daemon **106**, mcp 22 —
+> **374 total, 0 failed**. Six tests landed over plan. Daemon's five hardenings prove durable hook
+> refusal/failure events, redacted git stderr, serialized reset/reserve/re-registration, a
+> 30-second git deadline, and strict 40/64-hex SHAs. Core's extra test pins typed reservation
+> errors: genuine contention carries its existing failed attempt id while storage failures remain
+> internal errors, never a false `200 ignored`. Dependency diff since `f2c8143`: exactly
+> `crates/daemon/Cargo.toml` +5 lines (`sha2`, `hmac`, comment) — verified with
+> `git diff f2c8143 -- '**/Cargo.toml'`.
 
-- [x] `cargo test --workspace`: cli 30, core 215, daemon 101, mcp 22 — measured: daemon 106, rest as planned, 0 failed
+- [x] `cargo test --workspace`: cli 30, core 215, daemon 101, mcp 22 — measured: cli 30, core 216, daemon 106, mcp 22; 374 total, 0 failed
 - [x] `make check` clean
 - [x] Two new dependencies, daemon only (`sha2`, `hmac`) — `git diff f2c8143 -- '**/Cargo.toml'` shows nothing else
 - [x] A tampered/unsigned hook runs no git command — proven by a test
@@ -419,7 +423,7 @@ hooks.example.com {
 - [x] An invalid `OnCalendar` fails before any file is written — proven by a test
 - [x] A foreign file at a task path is refused, not deleted — proven by a test
 - [x] `remove` cleans up task timers and containers — proven by a test
-- [x] The hook path and the button share one `start_deploy`
+- [x] Hook and button share spec validation, typed reservation, and reserved-deploy spawning; the hook reserves before git so autonomous failures are durable
 - [x] Secret never on argv, never in a response body
 
 ## Not in this group
