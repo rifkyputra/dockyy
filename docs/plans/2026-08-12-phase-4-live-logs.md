@@ -87,7 +87,7 @@ against a data shape that cannot support it is the mistake this plan exists to p
   - `LocalExecutor` and `FakeExecutor` implementations
   - `FakeExecutor::expect_stream(program: &str, lines: Vec<String>)`
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 `crates/core/Cargo.toml`:
 
@@ -98,7 +98,7 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 Add it to `[workspace.dependencies]` in the root `Cargo.toml` too, matching how the other shared
 crates are declared, and reference it as `tokio-stream.workspace = true`.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 In `crates/core/src/exec/mod.rs`'s test module:
 
@@ -187,7 +187,7 @@ In `crates/core/src/exec/mod.rs`'s test module:
 
 `tempfile` is already a dev-dependency of `crates/core`.
 
-- [ ] **Step 3: Run to verify they fail**
+- [x] **Step 3: Run to verify they fail**
 
 ```bash
 PATH=$HOME/.cargo/bin:$PATH cargo test -p kuadrat-core exec:: 2>&1 | tail -20
@@ -195,7 +195,7 @@ PATH=$HOME/.cargo/bin:$PATH cargo test -p kuadrat-core exec:: 2>&1 | tail -20
 
 Expected: compile failure — `no method named run_streaming`.
 
-- [ ] **Step 4: Add the trait method**
+- [x] **Step 4: Add the trait method**
 
 In `crates/core/src/exec/mod.rs`, beside `run_with_stdin`:
 
@@ -226,7 +226,7 @@ In `crates/core/src/exec/mod.rs`, beside `run_with_stdin`:
 
 with `use tokio_stream::Stream;` at the top.
 
-- [ ] **Step 5: Implement it for `LocalExecutor`**
+- [x] **Step 5: Implement it for `LocalExecutor`**
 
 ```rust
 /// A child's stdout, line by line, with the child kept alive alongside it.
@@ -257,18 +257,18 @@ what `tokio-stream` buys here.
 `child.stdout.take()`, wraps it in `BufReader`, calls `.lines()`, wraps that in
 `LinesStream::new`, and returns `Box::new(ChildLines { .. })`.
 
-- [ ] **Step 6: Implement it for `FakeExecutor`**
+- [x] **Step 6: Implement it for `FakeExecutor`**
 
 Record the call the way the other methods do, then return
 `Box::new(tokio_stream::iter(lines.into_iter().map(Ok)))`. `expect_stream` stores the scripted lines
 per program beside the existing `expect`/`expect_call` maps; an unscripted program returns an error
 naming it, matching how the fake already behaves.
 
-- [ ] **Step 7: Run the suite**
+- [x] **Step 7: Run the suite**
 
 Expected: core **199** (195 + 4), daemon 80, cli 30. `make check` clean.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/core Cargo.toml Cargo.lock
@@ -286,7 +286,7 @@ git commit -m "feat(core): a streaming seam on the Executor"
 - Consumes: `Executor::run_streaming`, the existing `tail`, `MAX_LINES`, `unit_name`
 - Produces: `pub async fn follow(exec: &dyn Executor, name: &str, lines: usize) -> Result<Box<dyn Stream<Item = Result<String>> + Send + Unpin>>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[tokio::test]
@@ -333,9 +333,9 @@ git commit -m "feat(core): a streaming seam on the Executor"
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Follow a workload's journal: the last `lines` entries, then everything that
@@ -358,11 +358,11 @@ pub async fn follow(
 The body: `tail(exec, name, lines).await?;` then `exec.run_streaming("journalctl", &args).await`
 with `-u <unit> -f -n <clamped>` and the same no-`-q` reasoning the module already documents.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: core **202** (199 + 3), daemon 80, cli 30.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/core/src/logs/mod.rs
@@ -391,7 +391,7 @@ lines do not have.
 It shares `events_sse`'s *shape* — a renderer parameter, and the payload sanitised in the engine so
 no renderer can produce a `data` field that `sse::Event::data` rejects.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[tokio::test]
@@ -458,9 +458,9 @@ pre-flight `tail` (exit 0, empty stderr) and the stream. `register(&store, name)
 helper writing an `AppConfig`; if an equivalent already exists in the test module, use it rather
 than adding a second.
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `lines_sse` builds an `async_stream::stream!` that yields each line as an `sse::Event`, ends when
 the source ends, and is wrapped in `tokio::time::timeout(deadline, ..)` semantics — when the ceiling
@@ -479,11 +479,11 @@ The JSON renderer emits `serde_json::to_string(&serde_json::json!({ "line": line
 
 The handler 404s for an unregistered app before calling `follow`, as the existing logs endpoint does.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: daemon **84** (80 + 4), core 202, cli 30.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/daemon
@@ -501,7 +501,7 @@ git commit -m "feat(daemon): stream a workload's journal as JSON"
 - Consumes: `lines_sse`, `logs::follow`
 - Produces: `GET /app/:name/logs/stream` (HTML fragments), and the Follow control on `/app/:name`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     /// Follow is a control the operator presses, not behaviour on load — the
@@ -542,9 +542,9 @@ git commit -m "feat(daemon): stream a workload's journal as JSON"
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 A `log_line(line: &str) -> Markup` rendering one `<li class="log-line">`, used by the stream's
 renderer.
@@ -562,11 +562,11 @@ operator's choice to follow is in the URL, so it survives a reload and can be li
 Class names: `log-line`, `log-follow`. Check them against the adblock-bait list before committing —
 none of them contain a banned substring, and any name you add instead must not either.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Expected: daemon **87** (84 + 3), core 202, cli 30.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/daemon/src/pages.rs
@@ -580,13 +580,13 @@ git commit -m "feat(daemon): follow an app's log from its page"
 **Files:**
 - Modify: `docs/known-gaps.md`, `README.md`
 
-- [ ] **Step 1: Close H3's deferral**
+- [x] **Step 1: Close H3's deferral**
 
 `docs/known-gaps.md` records that live tailing was deferred to phase 4. Replace that with what
 shipped: the seam, `follow`, the two endpoints, the 30-minute ceiling, and that the second consumer
 — the MCP surface — is still to come.
 
-- [ ] **Step 2: Record the new gap**
+- [x] **Step 2: Record the new gap**
 
 ```markdown
 ## From phase 4 — a followed stream holds a `journalctl` for up to 30 minutes
@@ -599,12 +599,12 @@ That is the intended cost of live tailing and not a defect. It is recorded becau
 this project is a low-memory host, and "how many followers is too many" has never been measured.
 ```
 
-- [ ] **Step 3: Update the README**
+- [x] **Step 3: Update the README**
 
 Add live log following to what the web UI does, and the JSON endpoint to what an API client can
 consume. Keep it to the README's existing voice — a sentence, not a section.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs README.md
@@ -615,14 +615,20 @@ git commit -m "docs: record live log tailing and what it costs"
 
 ## Completion checklist
 
-- [ ] `cargo test --workspace` passes: core 202, daemon 87, cli 30
-- [ ] `make check` clean
-- [ ] `maud::PreEscaped` appears nowhere in the repository
-- [ ] No DOM id or class contains an adblock-bait substring
-- [ ] A streamed log line containing markup renders as text, proven by a test
-- [ ] Dropping a stream kills its child, proven by a test
-- [ ] An unreadable journal fails before any stream opens, proven by a test
-- [ ] One new dependency, `core` only
+> Closed 2026-08-18, verified on sumo. Daemon landed at **90** tests, not the 87 planned: the
+> whole-branch review polish (`240011b`) and the follow-mode fix (`90db30f`) added three beyond
+> this plan. `PreEscaped` appears only in two doc comments that state the rule; zero code usages.
+> Daemon's `tokio-stream` is `[dev-dependencies]` only (the deadline test's `pending`), so the
+> production tree still has exactly one new dependency, in `core`.
+
+- [x] `cargo test --workspace` passes: core 202, daemon 87, cli 30 — measured: core 202, daemon 90, cli 30, 0 failed
+- [x] `make check` clean
+- [x] `maud::PreEscaped` appears nowhere in the repository
+- [x] No DOM id or class contains an adblock-bait substring
+- [x] A streamed log line containing markup renders as text, proven by a test
+- [x] Dropping a stream kills its child, proven by a test
+- [x] An unreadable journal fails before any stream opens, proven by a test
+- [x] One new dependency, `core` only
 
 ## Not in this group
 
