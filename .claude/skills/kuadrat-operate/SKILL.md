@@ -1,6 +1,6 @@
 ---
 name: kuadrat-operate
-description: Use when operating a host whose workloads are managed by kuadrat (the Podman Quadlet deployment daemon) — a kuadrat-deployed service is down or failing, a deploy ended RolledBack or Failed, a spec/unit/secret/route needs changing, the host crashed mid-deploy, or the kuadrat daemon itself needs a health check. Also for questions about kuadrat's unit naming, file ownership, or safe dry-run testing.
+description: Use when operating a host whose workloads are managed by kuadrat (the Podman Quadlet deployment daemon) — a kuadrat-deployed service is down or failing, a deploy ended RolledBack or Failed, a spec/unit/secret/route needs changing, the host crashed mid-deploy, or the kuadrat daemon itself needs a health check. Also for questions about kuadrat's unit naming, file ownership, safe dry-run testing, or the MCP agent surface (`kuadrat mcp`, its six tools, why remove/secrets are absent).
 ---
 
 # Operating a kuadrat host
@@ -42,6 +42,7 @@ The `kuadrat-` prefix is both the collision guard and the ownership signal. `<sl
 | `secret set\|ls\|rm <name>` | podman secrets; values via **stdin** |
 | `reconcile` | roll back deploys left in flight by a crash |
 | `serve [--listen addr]` | the HTTP daemon (API, web UI, events) |
+| `mcp [--listen addr]` | MCP over stdio for an agent; requires a running daemon |
 
 ## Diagnosing a down workload
 
@@ -89,6 +90,27 @@ A missing named secret fails the deploy up front, before anything touches the ho
 
 `kuadrat.service` (`packaging/kuadrat.service` in the repo, installed to `/etc/systemd/system/`) runs `kuadrat serve --listen 127.0.0.1:7457` — **loopback only, no auth**; reach it remotely via SSH tunnel (`ssh -L 7457:127.0.0.1:7457 <host>`, then open `http://127.0.0.1:7457/`) or VPN, never by widening the bind. The web UI is at `http://127.0.0.1:7457/`. Health: `systemctl status kuadrat`, `journalctl -u kuadrat -e`, and `curl -fsS http://127.0.0.1:7457/api/apps` as a liveness probe (there is no `/healthz`). Webhook config goes through `KUADRAT_WEBHOOK_URL_FILE` via `EnvironmentFile=`, not `KUADRAT_WEBHOOK_URL` in an `Environment=` line — the URL carries its token and `systemctl show` exposes `Environment=` to anyone.
 
+## The MCP surface (agent access)
+
+`kuadrat mcp` is how an agent operates the host: the MCP client spawns it (stdio, not a daemon)
+and gets **six tools** — `list_apps`, `get_app`, `deploy`, `get_deploy`, `tail_logs`,
+`reconcile`. Register with `claude mcp add kuadrat -- kuadrat mcp`.
+
+- **It refuses to start without a running `kuadrat serve`** — it talks to the daemon over
+  loopback (`--listen addr` if the daemon isn't on the default `127.0.0.1:7457`), so no agent
+  deploy can bypass the daemon's timeline. "MCP won't start" → check the daemon first. The
+  `mcp` process itself needs no root — it is an HTTP client of the daemon.
+- **`deploy` is async**: it returns a `deploy_id` immediately — poll `get_deploy` for the
+  outcome; don't treat the fast return as `Done`.
+- **Deliberately absent, not missing**: `remove` (the one irreversible op — a human runs it),
+  the secret commands (values are stdin-only by construction; a JSON tool call can't provide
+  that), and live log *following* (`tail_logs` is a bounded snapshot readable in one turn —
+  follow live from a shell with `journalctl -u kuadrat-<slug> -f`).
+- Tool parameter schemas are not duplicated here — MCP tools self-describe; the client sees
+  the schemas at connect time.
+- Speaks both current MCP clients (per-request versioning, `server/discover`) and older
+  handshake-based ones (`initialize`).
+
 ## Common mistakes
 
 | Mistake | Reality |
@@ -100,3 +122,5 @@ A missing named secret fails the deploy up front, before anything touches the ho
 | `QUADLET_UNIT_DIRS` or user units for dry runs | use `--root <dir>` |
 | curling the daemon from another machine | loopback only; SSH tunnel |
 | treating `RolledBack` as the emergency | rollback worked; `Failed` is the one needing a human |
+| debugging why MCP has no `remove`/secrets | omitted by design — those go through a human shell |
+| `kuadrat mcp` exits at startup | it requires a running `kuadrat serve`; start the daemon |

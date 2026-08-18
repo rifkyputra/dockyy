@@ -69,6 +69,10 @@ kuadrat deploy pbrain
 - **Secrets** — `podman secret` management; specs carry names, never values
 - **Logs** — journald reads scoped to a unit, streamable live as JSON for an API client
 - **Web UI** — status, live deploy progress, logs, live log following
+- **Push to deploy** — a `git push` to GitHub or GitLab redeploys the app through a signed
+  webhook; a failed hook lands in the deploy timeline, not a void
+- **Scheduled tasks** — spec-declared commands on systemd timers, each run a fresh container
+  from the app's image; results live in `systemctl list-timers` and the journal
 - **MCP surface** — `kuadrat mcp` speaks MCP over stdio: an agent can list apps, deploy, watch a
   deploy's stages, tail a journal, and reconcile after a crash. Deliberately no `remove` and no
   secrets — it proposes, a human approves the irreversible
@@ -220,6 +224,7 @@ marker, and a foreign file at a target path is refused, never clobbered.
 | `health_cmd` | string \| null | **required** when `route` is set |
 | `restart_policy` | `"Always"` \| `"OnFailure"` \| `"No"` | |
 | `route` | `{domain, port}` \| null | needs Caddy |
+| `tasks` | `{name, schedule, command}[]` | systemd timers; `schedule` is an `OnCalendar` expression (`daily`, `*-*-* 03:00:00`), `command` runs in a fresh container from the app's image with its env and secrets |
 
 Newlines and carriage returns are rejected in every rendered field — a `\n` in an env value would
 otherwise inject directives (`Secret=`, `User=`) nobody wrote. `%` is escaped so systemd does not
@@ -255,6 +260,39 @@ commands (values are stdin-only by construction, a property a JSON tool call can
 live log following (a tool call is request/response; `tail_logs` is the bounded snapshot an agent
 can read in one turn). It answers both current MCP clients (per-request versioning,
 `server/discover`) and older handshake-based ones (`initialize`).
+
+### Push to deploy
+
+A `git push` can redeploy an app: GitHub and GitLab POST to the daemon, kuadrat verifies the
+delivery, resets the host repo to the pushed commit, and runs the same deploy the button runs.
+
+1. **Configure the shared secret** (the routes answer 404 until one exists). Same file-over-env
+   reasoning as the outbound webhook:
+
+| Variable | Value |
+|---|---|
+| `KUADRAT_HOOK_SECRET` | the secret directly |
+| `KUADRAT_HOOK_SECRET_FILE` | path to a file containing it |
+
+2. **Expose the hook routes.** The daemon stays loopback-only; the signature is the
+   authentication, so exposure is one Caddy block (or an SSH/Cloudflare tunnel):
+
+```caddy
+hooks.example.com {
+    reverse_proxy 127.0.0.1:7457
+}
+```
+
+3. **Point the forge at the app's route** with the same secret:
+   GitHub → `https://hooks.example.com/hooks/github/<app>` (secret in the webhook's Secret
+   field, `application/json` payload); GitLab → `https://hooks.example.com/hooks/gitlab/<app>`
+   (Secret token field).
+
+Only a push to the branch the host repo has checked out deploys; anything else — another
+branch, a tag, a delivery during an in-flight deploy — is answered `200 {"ignored": <why>}` so
+the forge never marks the hook broken. The checkout is `reset --hard` to the pushed commit:
+a push-to-deploy working copy is a deployment surface, not a workspace. Failures (bad branch
+read, fetch, reset) are recorded in the app's deploy timeline where an operator will look.
 
 ### The webhook
 

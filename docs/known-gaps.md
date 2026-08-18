@@ -361,3 +361,23 @@ The startup probe keeps "no daemon" out of the per-call path, but a daemon that 
 probe surfaces as a tool error naming `kuadrat serve` on every subsequent call. An agent may
 retry a few times before reading it. Deliberate: exiting the MCP process mid-session would take
 the agent's whole surface down to report one dead dependency.
+
+## From phase 6 — no hook queue: a push during a deploy is dropped with a receipt
+
+A delivery that arrives while a deploy of the same app is in flight is answered
+`200 {"ignored": "deploy in progress"}` and recorded as a failed attempt in the timeline —
+never queued. The operator resolves it by pushing again or redelivering from the forge. A queue
+is real machinery (ordering, coalescing, retry policy) for a case with a one-click manual fix;
+build it when a real workflow hits this more than occasionally.
+
+## From phase 6 — Gitea and Bitbucket are unclaimed
+
+Gitea sends GitHub-shaped deliveries and may work against `/hooks/github/:app` as-is; nothing
+tests or promises it. Bitbucket's shape differs and is simply not implemented.
+
+## From phase 6 — task runs have no kuadrat-side history
+
+A scheduled task's result lives where systemd puts it: `systemctl list-timers`, the oneshot
+service's status, and the journal (readable via `tail_logs` only if the task logs under the
+app's unit, which it does not — it is its own unit). kuadrat's store records deploys, not task
+runs. If task observability matters later, the store's event model is where it would go.
