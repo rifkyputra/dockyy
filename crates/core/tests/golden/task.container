@@ -1,0 +1,13 @@
+# kuadrat-managed: true
+[Unit]
+Description=kuadrat task daily-cleanup for web
+
+[Container]
+Image=docker.io/library/alpine:3.20
+ContainerName=kuadrat-web-task-daily-cleanup
+Environment=NODE_ENV=production
+Secret=db-password
+Exec=sh -c true
+
+[Service]
+Type=oneshot

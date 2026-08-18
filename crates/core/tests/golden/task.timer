@@ -1,0 +1,10 @@
+# kuadrat-managed: true
+[Unit]
+Description=kuadrat timer daily-cleanup for web
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

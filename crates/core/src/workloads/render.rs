@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::spec::{slug, WorkloadSpec};
-use crate::workloads::paths::UNIT_PREFIX;
+use crate::spec::{slug, ScheduledTask, WorkloadSpec};
+use crate::workloads::paths::{task_unit_name, UNIT_PREFIX};
 
 /// Marker identifying a unit file kuadrat generated and may overwrite.
 pub const MANAGED_MARKER: &str = "# kuadrat-managed: true";
@@ -111,6 +111,133 @@ pub fn render(spec: &WorkloadSpec) -> Result<String> {
     out.push_str("[Install]\nWantedBy=multi-user.target\n");
 
     Ok(out)
+}
+
+/// Render one scheduled task as a Quadlet oneshot `.container`. Pure — no I/O.
+///
+/// The task gets the app's image, env, and secrets and its own `Exec` —
+/// never ports, volumes, a route, or a healthcheck: the timer is its only
+/// trigger and its exit code its only result. No `[Install]` section, so it
+/// cannot start at boot; the timer activates the generated service by name.
+pub fn render_task(spec: &WorkloadSpec, task: &ScheduledTask) -> Result<String> {
+    spec.validate()?;
+
+    let mut out = String::new();
+    out.push_str(MANAGED_MARKER);
+    out.push('\n');
+
+    out.push_str("[Unit]\n");
+    out.push_str(&format!(
+        "Description=kuadrat task {} for {}\n\n",
+        slug(&task.name),
+        spec.name
+    ));
+
+    out.push_str("[Container]\n");
+    out.push_str(&format!("Image={}\n", spec.image));
+    out.push_str(&format!(
+        "ContainerName={}\n",
+        task_unit_name(&spec.name, &task.name)
+    ));
+    for (key, value) in &spec.env {
+        let assignment = format!("{}={}", escape_percent(key), escape_percent(value));
+        out.push_str(&format!("Environment={}\n", quote_word(&assignment)));
+    }
+    for secret in &spec.secrets {
+        out.push_str(&format!("Secret={secret}\n"));
+    }
+    let argv: Vec<String> = task
+        .command
+        .iter()
+        .map(|a| quote_word(&escape_percent(a)))
+        .collect();
+    out.push_str(&format!("Exec={}\n", argv.join(" ")));
+    out.push('\n');
+
+    out.push_str("[Service]\nType=oneshot\n");
+
+    Ok(out)
+}
+
+/// Render one task's `.timer`. Pure — no I/O. Validates like every renderer,
+/// so no unvalidated schedule reaches disk.
+pub fn render_timer(spec: &WorkloadSpec, task: &ScheduledTask) -> Result<String> {
+    spec.validate()?;
+
+    let mut out = String::new();
+    out.push_str(MANAGED_MARKER);
+    out.push('\n');
+    out.push_str("[Unit]\n");
+    out.push_str(&format!(
+        "Description=kuadrat timer {} for {}\n\n",
+        slug(&task.name),
+        spec.name
+    ));
+    out.push_str("[Timer]\n");
+    out.push_str(&format!("OnCalendar={}\n", escape_percent(&task.schedule)));
+    out.push_str("Persistent=true\n\n");
+    out.push_str("[Install]\nWantedBy=timers.target\n");
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests_tasks {
+    use super::*;
+    use crate::spec::{ScheduledTask, WorkloadSpec};
+
+    fn spec_with_task() -> (WorkloadSpec, ScheduledTask) {
+        let mut spec = WorkloadSpec::new("web", "docker.io/library/alpine:3.20");
+        spec.env = vec![("NODE_ENV".into(), "production".into())];
+        spec.secrets = vec!["db-password".into()];
+        let task = ScheduledTask {
+            name: "Daily Cleanup".into(),
+            schedule: "daily".into(),
+            command: vec!["sh".into(), "-c".into(), "true".into()],
+        };
+        spec.tasks = vec![task.clone()];
+        (spec, task)
+    }
+
+    #[test]
+    fn renders_a_task_container_and_timer() {
+        let (spec, task) = spec_with_task();
+        assert_eq!(
+            render_task(&spec, &task).expect("render"),
+            include_str!("../../tests/golden/task.container")
+        );
+        assert_eq!(
+            render_timer(&spec, &task).expect("render"),
+            include_str!("../../tests/golden/task.timer")
+        );
+    }
+
+    /// A task container must not start at boot, publish ports, or carry a
+    /// healthcheck — the timer is its only trigger and its exit code is its
+    /// only result.
+    #[test]
+    fn a_task_container_is_oneshot_and_routeless() {
+        let (mut spec, task) = spec_with_task();
+        spec.ports = vec!["3000:3000".into()];
+        spec.health_cmd = Some("curl -fsS localhost".into());
+        spec.route = None;
+        let unit = render_task(&spec, &task).expect("render");
+        assert!(unit.contains("Type=oneshot"), "{unit}");
+        assert!(!unit.contains("PublishPort"), "{unit}");
+        assert!(!unit.contains("HealthCmd"), "{unit}");
+        assert!(!unit.contains("WantedBy=multi-user.target"), "{unit}");
+    }
+
+    #[test]
+    fn rendered_task_files_always_carry_the_managed_marker() {
+        let (spec, task) = spec_with_task();
+        for text in [
+            render_task(&spec, &task).expect("render"),
+            render_timer(&spec, &task).expect("render"),
+        ] {
+            assert!(text.starts_with(MANAGED_MARKER), "{text}");
+        }
+    }
 }
 
 #[cfg(test)]
