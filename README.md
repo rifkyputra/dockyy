@@ -69,8 +69,9 @@ kuadrat deploy pbrain
 - **Secrets** — `podman secret` management; specs carry names, never values
 - **Logs** — journald reads scoped to a unit, streamable live as JSON for an API client
 - **Web UI** — status, live deploy progress, logs, live log following
-- **MCP surface** — an agent can diagnose failures, deploy, and author config. Advisory only:
-  it proposes, a human approves
+- **MCP surface** — `kuadrat mcp` speaks MCP over stdio: an agent can list apps, deploy, watch a
+  deploy's stages, tail a journal, and reconcile after a crash. Deliberately no `remove` and no
+  secrets — it proposes, a human approves the irreversible
 - **Events** — typed and subscribable; kuadrat emits, subscribers deliver
 
 ## Guide
@@ -235,6 +236,25 @@ expand it as a specifier.
 | `secret set\|ls\|rm <name>` | podman secrets; values via stdin |
 | `reconcile` | roll back deploys left in flight by a crash |
 | `serve [--listen addr]` | run the HTTP daemon: API, web UI, event stream. Loopback only |
+| `mcp [--listen addr]` | speak MCP over stdio for an agent; requires a running daemon |
+
+### The MCP surface
+
+`kuadrat mcp` is how an agent operates this host: an MCP client spawns it and gets six tools —
+`list_apps`, `get_app`, `deploy`, `get_deploy`, `tail_logs`, `reconcile`. It talks to the daemon
+over loopback and refuses to start without one, so an agent can never run a deploy the daemon's
+timeline does not contain. `deploy` returns its `deploy_id` immediately; the agent polls
+`get_deploy`. Register it with Claude Code:
+
+```bash
+claude mcp add kuadrat -- kuadrat mcp
+```
+
+Deliberately absent: `remove` (the one irreversible operation — a human runs it), the secret
+commands (values are stdin-only by construction, a property a JSON tool call cannot provide), and
+live log following (a tool call is request/response; `tail_logs` is the bounded snapshot an agent
+can read in one turn). It answers both current MCP clients (per-request versioning,
+`server/discover`) and older handshake-based ones (`initialize`).
 
 ### The webhook
 

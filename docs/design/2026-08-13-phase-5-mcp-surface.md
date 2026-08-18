@@ -198,3 +198,31 @@ Worth pinning specifically:
 - **Should `reconcile` be a tool at all?** It is the recovery path for a crashed deploy, which is
   exactly when an agent is most likely to be the one looking — and also exactly when a wrong guess
   costs the most.
+
+---
+
+## Addendum — what shipped (2026-08-18)
+
+The protocol check this document mandated ("read the current protocol version out of the
+specification when implementing") found more drift than a version string. The current MCP
+revision, **2026-07-28**, removed the `initialize` handshake this document describes: modern
+clients declare the protocol version on **every request**
+(`_meta["io.modelcontextprotocol/protocolVersion"]`), servers must implement a
+`server/discover` RPC, and an unsupported version is JSON-RPC error `-32022` naming the
+supported list. The handshake era (`2025-11-25` and earlier) is now "legacy", with a
+spec-defined dual-era compatibility model.
+
+What shipped is a **dual-era server**, the one shape the spec's compatibility matrix says works
+with both current and older clients: requests carrying modern `_meta` are served statelessly per
+2026-07-28; an `initialize` selects legacy semantics for the rest of the process. Everything
+else in this document held: stdio only, daemon-required with the startup probe, hand-rolled
+JSON-RPC in `crates/mcp` (no `kuadrat-core` linkage, no new external dependency), and the tool
+surface as tabled — plus one daemon addition this document implied but did not name:
+`POST /api/reconcile`, which acquires the deploy slot before reconciling so recovery through a
+live daemon can never roll back a deploy that is merely in flight.
+
+The two open questions were confirmed by Rifky on 2026-08-18, before implementation: `deploy`
+returns immediately with the `deploy_id` (the agent polls `get_deploy`), and `reconcile` is a
+tool.
+
+Plan and record: [`../plans/2026-08-18-phase-5-mcp-surface.md`](../plans/2026-08-18-phase-5-mcp-surface.md).

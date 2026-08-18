@@ -346,3 +346,18 @@ Two things follow, and they are the reason this is written down:
   here it is a hang: graceful shutdown waits for response bodies to end, and these bodies are
   deliberately long-lived, so shutdown would block on every open follower for up to the full
   30-minute ceiling. Adding it means also giving the followers a shutdown signal to end on.
+
+## From phase 5 — the MCP surface trusts loopback exactly as far as the daemon does
+
+`kuadrat mcp` adds no listener: the client spawns it and owns its pipe, and it talks to the
+daemon over the same unauthenticated loopback HTTP every other client uses. It therefore
+inherits the auth/CSRF trigger recorded above rather than adding to it — but a host where
+untrusted local processes can reach 127.0.0.1:7457 was already trusting them with the daemon,
+and the MCP surface makes that reach more convenient. Same trigger, same fix, same change.
+
+## From phase 5 — a daemon that dies mid-session becomes a per-call tool error
+
+The startup probe keeps "no daemon" out of the per-call path, but a daemon that exits after the
+probe surfaces as a tool error naming `kuadrat serve` on every subsequent call. An agent may
+retry a few times before reading it. Deliberate: exiting the MCP process mid-session would take
+the agent's whole surface down to report one dead dependency.
