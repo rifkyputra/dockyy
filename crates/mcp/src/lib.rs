@@ -222,14 +222,19 @@ mod tests {
         raw_session(daemon, input.as_bytes()).await
     }
 
-    struct NoDaemon;
-    impl crate::daemon::Daemon for NoDaemon {}
+    use crate::daemon::FakeDaemon;
+
+    /// An unscripted fake refuses every request — which these protocol-layer
+    /// tests never notice, because none of them reach a tool.
+    fn no_daemon() -> FakeDaemon {
+        FakeDaemon::new()
+    }
 
     #[tokio::test]
     async fn a_parse_error_is_minus_32700_and_the_session_survives() {
         // Feed garbage, then a valid request: the second must still be answered.
         let out = raw_session(
-            &NoDaemon,
+            &no_daemon(),
             b"this is not json\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"nope\"}\n",
         )
         .await;
@@ -246,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_method_is_minus_32601() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[serde_json::json!({
                 "jsonrpc": "2.0", "id": 7, "method": "resources/list"
             })],
@@ -260,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn a_notification_gets_no_response_at_all() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[serde_json::json!({
                 "jsonrpc": "2.0", "method": "notifications/initialized"
             })],
@@ -274,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn a_modern_client_needs_no_initialize() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover",
                 "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } })],
         )
@@ -293,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsupported_modern_version_is_minus_32022_naming_supported() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list",
                 "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "1900-01-01" } } })],
         )
@@ -307,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_echoes_a_known_legacy_version() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[
                 serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "protocolVersion": "2025-06-18",
@@ -329,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn initialize_with_an_unknown_version_answers_2025_11_25() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[
                 serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": { "protocolVersion": "1900-01-01",
@@ -346,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_before_any_era_is_an_error_and_the_session_survives() {
         let out = session(
-            &NoDaemon,
+            &no_daemon(),
             &[
                 serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
                 serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize",
