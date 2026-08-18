@@ -1,14 +1,20 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 
 use crate::exec::Executor;
 use crate::fs::FileSystem;
 use crate::managed::ensure_owned;
 use crate::spec::WorkloadSpec;
-use crate::workloads::render::{render, MANAGED_MARKER};
+use crate::workloads::paths::{task_container_path, task_stem_prefix, task_timer_path};
+use crate::workloads::render::{render, render_task, render_timer, MANAGED_MARKER};
 
-pub use crate::workloads::paths::{unit_name, unit_path, Paths};
+pub use crate::workloads::paths::{task_unit_name, unit_name, unit_path, Paths};
 
-/// Write the unit, reload systemd, and start the workload.
+/// Write the unit, reload systemd, and start the workload — and its scheduled
+/// tasks: one oneshot `.container` + `.timer` per task, enabled after the
+/// reload, with task units the spec no longer names pruned.
 ///
 /// Idempotent: the same spec produces byte-identical output. Refuses to touch a unit file
 /// kuadrat does not own.
@@ -19,9 +25,51 @@ pub async fn apply(
     spec: &WorkloadSpec,
 ) -> Result<()> {
     let unit = render(spec)?;
-    let path = unit_path(paths, &spec.name);
 
+    // Preflight every schedule before ANY write. `systemctl enable` accepts a
+    // timer whose OnCalendar cannot parse — the timer just never fires,
+    // silently. This turns that into an error naming the task, now.
+    for task in &spec.tasks {
+        let out = exec
+            .run(
+                "systemd-analyze",
+                &["calendar".to_string(), task.schedule.clone()],
+            )
+            .await?;
+        if !out.success() {
+            bail!(
+                "task {:?} has an invalid schedule: {}",
+                task.name,
+                out.stderr.trim()
+            );
+        }
+    }
+
+    // Render everything before writing anything.
+    struct TaskFiles {
+        container: PathBuf,
+        container_text: String,
+        timer: PathBuf,
+        timer_text: String,
+        timer_unit: String,
+    }
+    let mut task_files = Vec::with_capacity(spec.tasks.len());
+    for task in &spec.tasks {
+        task_files.push(TaskFiles {
+            container: task_container_path(paths, &spec.name, &task.name),
+            container_text: render_task(spec, task)?,
+            timer: task_timer_path(paths, &spec.name, &task.name),
+            timer_text: render_timer(spec, task)?,
+            timer_unit: format!("{}.timer", task_unit_name(&spec.name, &task.name)),
+        });
+    }
+
+    let path = unit_path(paths, &spec.name);
     ensure_owned(fsys, &path, MANAGED_MARKER, "overwrite").await?;
+    for tf in &task_files {
+        ensure_owned(fsys, &tf.container, MANAGED_MARKER, "overwrite").await?;
+        ensure_owned(fsys, &tf.timer, MANAGED_MARKER, "overwrite").await?;
+    }
 
     let previous = if fsys.exists(&path).await? {
         Some(fsys.read_to_string(&path).await?)
@@ -30,7 +78,23 @@ pub async fn apply(
     };
 
     fsys.create_dir_all(&paths.quadlet_dir).await?;
+    if !task_files.is_empty() {
+        fsys.create_dir_all(&paths.systemd_dir).await?;
+    }
     fsys.write(&path, &unit).await?;
+    for tf in &task_files {
+        fsys.write(&tf.container, &tf.container_text).await?;
+        fsys.write(&tf.timer, &tf.timer_text).await?;
+    }
+
+    // Prune task units this spec no longer names — disable their timers while
+    // systemd still knows them, then delete the files.
+    let keep: HashSet<String> = spec
+        .tasks
+        .iter()
+        .map(|t| task_unit_name(&spec.name, &t.name))
+        .collect();
+    prune_tasks(exec, fsys, paths, &spec.name, &keep).await?;
 
     systemctl(exec, &["daemon-reload".to_string()]).await?;
 
@@ -41,21 +105,40 @@ pub async fn apply(
     let action = if changed { "restart" } else { "start" };
     systemctl(exec, &[action.to_string(), unit_name(&spec.name)]).await?;
 
+    for tf in &task_files {
+        systemctl(
+            exec,
+            &[
+                "enable".to_string(),
+                "--now".to_string(),
+                tf.timer_unit.clone(),
+            ],
+        )
+        .await?;
+    }
+
     Ok(())
 }
 
-/// Stop the workload, delete its unit, and reload systemd. Safe if absent.
+/// Stop the workload, delete its unit and its tasks' units, and reload
+/// systemd. Safe if absent.
 ///
-/// Refuses to delete a unit file kuadrat does not own.
+/// Refuses to delete a unit file kuadrat does not own. Tasks are cleaned even
+/// when the main unit is already gone, so an orphaned timer cannot outlive
+/// its app.
 pub async fn remove(
     exec: &dyn Executor,
     fsys: &dyn FileSystem,
     paths: &Paths,
     name: &str,
 ) -> Result<()> {
-    let path = unit_path(paths, name);
+    let pruned = prune_tasks(exec, fsys, paths, name, &HashSet::new()).await?;
 
+    let path = unit_path(paths, name);
     if !ensure_owned(fsys, &path, MANAGED_MARKER, "remove").await? {
+        if pruned {
+            systemctl(exec, &["daemon-reload".to_string()]).await?;
+        }
         return Ok(());
     }
 
@@ -66,12 +149,236 @@ pub async fn remove(
     Ok(())
 }
 
+/// Delete this app's task files whose unit stem is not in `keep`, disabling
+/// each stale `.timer` first (while systemd still knows it). Ownership-gated:
+/// a matching filename without the managed marker is refused, never deleted.
+/// Returns whether anything was removed.
+async fn prune_tasks(
+    exec: &dyn Executor,
+    fsys: &dyn FileSystem,
+    paths: &Paths,
+    spec_name: &str,
+    keep: &HashSet<String>,
+) -> Result<bool> {
+    let prefix = task_stem_prefix(spec_name);
+    let mut removed = false;
+    for dir in [&paths.quadlet_dir, &paths.systemd_dir] {
+        if !fsys.exists(dir).await? {
+            continue;
+        }
+        for entry in fsys.read_dir(dir).await? {
+            let Some(stem) = entry
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !stem.starts_with(&prefix) || keep.contains(&stem) {
+                continue;
+            }
+            if !ensure_owned(fsys, &entry, MANAGED_MARKER, "remove").await? {
+                continue;
+            }
+            if entry.extension().is_some_and(|e| e == "timer") {
+                systemctl(
+                    exec,
+                    &[
+                        "disable".to_string(),
+                        "--now".to_string(),
+                        format!("{stem}.timer"),
+                    ],
+                )
+                .await?;
+            }
+            fsys.remove_file(&entry).await?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
 async fn systemctl(exec: &dyn Executor, args: &[String]) -> Result<()> {
     let out = exec.run("systemctl", args).await?;
     if !out.success() {
         bail!("systemctl {} failed: {}", args.join(" "), out.stderr.trim());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_tasks {
+    use super::*;
+    use crate::exec::fake::FakeExecutor;
+    use crate::exec::CommandOutput;
+    use crate::fs::fake::FakeFileSystem;
+    use crate::fs::local::LocalFileSystem;
+    use crate::spec::{ScheduledTask, WorkloadSpec};
+    use crate::workloads::paths::{task_container_path, task_timer_path};
+    use tempfile::tempdir;
+
+    fn ok() -> CommandOutput {
+        CommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn spec_with_cleanup_task() -> WorkloadSpec {
+        let mut spec = WorkloadSpec::new("web", "alpine");
+        spec.tasks = vec![ScheduledTask {
+            name: "cleanup".into(),
+            schedule: "daily".into(),
+            command: vec!["true".into()],
+        }];
+        spec
+    }
+
+    #[tokio::test]
+    async fn apply_writes_task_units_and_enables_their_timers() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fake = FakeExecutor::new();
+        let fs = LocalFileSystem;
+        fake.expect("systemctl", ok());
+        fake.expect("systemd-analyze", ok());
+
+        apply(&fake, &fs, &paths, &spec_with_cleanup_task())
+            .await
+            .expect("apply");
+
+        assert!(task_container_path(&paths, "web", "cleanup").exists());
+        assert!(task_timer_path(&paths, "web", "cleanup").exists());
+
+        let calls = fake.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|(p, a)| p == "systemd-analyze" && a == &vec!["calendar", "daily"]),
+            "no schedule preflight: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|(_, a)| a
+                == &vec![
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "kuadrat-web-task-cleanup.timer".to_string()
+                ]),
+            "timer not enabled: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_schedule_fails_before_any_file_is_written() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fake = FakeExecutor::new();
+        let fs = LocalFileSystem;
+        fake.expect(
+            "systemd-analyze",
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "Failed to parse calendar specification".into(),
+            },
+        );
+
+        let err = apply(&fake, &fs, &paths, &spec_with_cleanup_task())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cleanup"), "{err}");
+        assert!(!unit_path(&paths, "web").exists(), "main unit was written");
+        assert!(!task_container_path(&paths, "web", "cleanup").exists());
+        // Only the preflight ran; systemd was never touched.
+        assert!(fake.calls().iter().all(|(p, _)| p == "systemd-analyze"));
+    }
+
+    #[tokio::test]
+    async fn a_task_removed_from_the_spec_is_pruned_on_apply() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fake = FakeExecutor::new();
+        let fs = LocalFileSystem;
+        fake.expect("systemctl", ok());
+        fake.expect("systemd-analyze", ok());
+
+        apply(&fake, &fs, &paths, &spec_with_cleanup_task())
+            .await
+            .expect("first apply");
+        // Same app, no tasks: the cleanup task's units must go.
+        apply(&fake, &fs, &paths, &WorkloadSpec::new("web", "alpine"))
+            .await
+            .expect("second apply");
+
+        assert!(!task_container_path(&paths, "web", "cleanup").exists());
+        assert!(!task_timer_path(&paths, "web", "cleanup").exists());
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|(_, a)| a
+                == &vec![
+                    "disable".to_string(),
+                    "--now".to_string(),
+                    "kuadrat-web-task-cleanup.timer".to_string()
+                ]),
+            "stale timer not disabled: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_file_matching_the_task_prefix_is_refused_not_deleted() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fake = FakeExecutor::new();
+        let fs = FakeFileSystem::new();
+        fake.expect("systemctl", ok());
+        fake.expect("systemd-analyze", ok());
+
+        // An operator's own file at exactly the path kuadrat would use.
+        let foreign = "[Container]\nImage=evil\n";
+        fs.insert(task_container_path(&paths, "web", "cleanup"), foreign);
+
+        let err = apply(&fake, &fs, &paths, &spec_with_cleanup_task())
+            .await
+            .expect_err("foreign task file is refused");
+
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(
+            fs.contents(task_container_path(&paths, "web", "cleanup"))
+                .as_deref(),
+            Some(foreign)
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_cleans_up_task_units_with_the_app() {
+        let dir = tempdir().expect("tempdir");
+        let paths = Paths::rooted(dir.path());
+        let fake = FakeExecutor::new();
+        let fs = LocalFileSystem;
+        fake.expect("systemctl", ok());
+        fake.expect("systemd-analyze", ok());
+
+        apply(&fake, &fs, &paths, &spec_with_cleanup_task())
+            .await
+            .expect("apply");
+        remove(&fake, &fs, &paths, "web").await.expect("remove");
+
+        assert!(!task_container_path(&paths, "web", "cleanup").exists());
+        assert!(!task_timer_path(&paths, "web", "cleanup").exists());
+        assert!(!unit_path(&paths, "web").exists());
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|(_, a)| a
+                == &vec![
+                    "disable".to_string(),
+                    "--now".to_string(),
+                    "kuadrat-web-task-cleanup.timer".to_string()
+                ]),
+            "timer not disabled on remove: {calls:?}"
+        );
+    }
 }
 
 #[cfg(test)]
