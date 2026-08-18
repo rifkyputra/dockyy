@@ -5,6 +5,7 @@
 
 pub mod daemon;
 pub mod rpc;
+pub mod tools;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -34,7 +35,6 @@ pub async fn serve(
     reader: impl AsyncBufRead + Unpin,
     writer: impl AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let _ = daemon;
     let mut era = Era::Undetermined;
     let mut writer = writer;
     let mut lines = reader.lines();
@@ -44,7 +44,7 @@ pub async fn serve(
         }
         let out = match rpc::parse_line(&line) {
             Err(fault) => Some(rpc::error_line(None, -32700, &fault, None)),
-            Ok(req) => handle(&req, &mut era),
+            Ok(req) => handle(&req, &mut era, daemon).await,
         };
         if let Some(out) = out {
             writer.write_all(out.as_bytes()).await?;
@@ -68,7 +68,7 @@ fn meta_version(params: &Value) -> Option<&str> {
 }
 
 /// `None` = notification, nothing to write.
-fn handle(req: &rpc::Incoming, era: &mut Era) -> Option<String> {
+async fn handle(req: &rpc::Incoming, era: &mut Era, daemon: &dyn daemon::Daemon) -> Option<String> {
     // `initialize` selects legacy semantics for the rest of the process,
     // whatever came before it.
     if req.method == "initialize" {
@@ -124,15 +124,17 @@ fn handle(req: &rpc::Incoming, era: &mut Era) -> Option<String> {
                 Some(json!({ "supported": [MODERN_VERSION], "requested": v })),
             ));
         }
-        return Some(dispatch(req, id, true));
+        return Some(dispatch(req, id, true, daemon).await);
     }
 
     match era {
-        Era::Legacy => Some(dispatch(req, id, false)),
+        Era::Legacy => Some(dispatch(req, id, false, daemon).await),
         // `server/discover` is the compatibility probe; refusing the request
         // that exists to prevent misreads would defeat it. Everything else
         // needs an era first.
-        Era::Undetermined if req.method == "server/discover" => Some(dispatch(req, id, true)),
+        Era::Undetermined if req.method == "server/discover" => {
+            Some(dispatch(req, id, true, daemon).await)
+        }
         Era::Undetermined => Some(rpc::error_line(
             Some(id),
             -32600,
@@ -145,7 +147,12 @@ fn handle(req: &rpc::Incoming, era: &mut Era) -> Option<String> {
 
 /// One method, one line out. `modern` decides whether results carry the
 /// 2026-07-28 `resultType` marker; the method set is the same in both eras.
-fn dispatch(req: &rpc::Incoming, id: &Value, modern: bool) -> String {
+async fn dispatch(
+    req: &rpc::Incoming,
+    id: &Value,
+    modern: bool,
+    daemon: &dyn daemon::Daemon,
+) -> String {
     match req.method.as_str() {
         "server/discover" => {
             let result = json!({
@@ -162,6 +169,36 @@ fn dispatch(req: &rpc::Incoming, id: &Value, modern: bool) -> String {
                 result["resultType"] = json!("complete");
             }
             rpc::response_line(id, result)
+        }
+        "tools/list" => {
+            let mut result = json!({ "tools": tools::definitions() });
+            if modern {
+                result["resultType"] = json!("complete");
+            }
+            rpc::response_line(id, result)
+        }
+        "tools/call" => {
+            let name = req.params.get("name").and_then(Value::as_str).unwrap_or("");
+            let no_args = json!({});
+            let arguments = req.params.get("arguments").unwrap_or(&no_args);
+            match tools::dispatch(name, arguments, daemon).await {
+                tools::Dispatched::Result { text, is_error } => {
+                    let mut result = json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "isError": is_error,
+                    });
+                    if modern {
+                        result["resultType"] = json!("complete");
+                    }
+                    rpc::response_line(id, result)
+                }
+                tools::Dispatched::UnknownTool => {
+                    rpc::error_line(Some(id), -32602, &format!("Unknown tool: {name}"), None)
+                }
+                tools::Dispatched::BadArguments(msg) => {
+                    rpc::error_line(Some(id), -32602, &msg, None)
+                }
+            }
         }
         other => rpc::error_line(
             Some(id),
@@ -369,6 +406,100 @@ mod tests {
         assert!(
             out[1]["result"]["protocolVersion"].is_string(),
             "{:?}",
+            out[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_list_matches_the_dispatch_set_in_the_modern_era() {
+        let fake = FakeDaemon::new();
+        let out = session(
+            &fake,
+            &[serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } }
+            })],
+        )
+        .await;
+        let tools = out[0]["result"]["tools"].as_array().expect("tools");
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "list_apps",
+                "get_app",
+                "deploy",
+                "get_deploy",
+                "tail_logs",
+                "reconcile"
+            ]
+        );
+        assert_eq!(out[0]["result"]["resultType"], "complete");
+        for t in tools {
+            assert!(t["inputSchema"].is_object(), "{t}");
+            assert!(t["description"].is_string(), "{t}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_session_calls_a_tool_end_to_end() {
+        use crate::daemon::{Answer, Method};
+        let fake = FakeDaemon::new();
+        fake.expect(
+            Method::Get,
+            "/api/apps",
+            Answer::Ok {
+                body: r#"[{"name":"web"}]"#.into(),
+            },
+        );
+        let out = session(
+            &fake,
+            &[
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": { "protocolVersion": "2025-11-25", "capabilities": {},
+                                "clientInfo": { "name": "t", "version": "0" } } }),
+                serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+                serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "list_apps", "arguments": {} } }),
+            ],
+        )
+        .await;
+        let call = &out[1];
+        assert_eq!(call["result"]["isError"], false);
+        assert!(call["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("web"));
+        assert!(call["result"].get("resultType").is_none());
+    }
+
+    /// The spec: unknown tool is a PROTOCOL error (-32602), not a tool
+    /// error — and the session survives it.
+    #[tokio::test]
+    async fn an_unknown_tool_name_is_minus_32602_and_the_session_survives() {
+        use crate::daemon::{Answer, Method};
+        let fake = FakeDaemon::new();
+        fake.expect(Method::Get, "/api/apps", Answer::Ok { body: "[]".into() });
+        let out = session(
+            &fake,
+            &[
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": { "name": "remove", "arguments": {},
+                                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } }),
+                serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "list_apps", "arguments": {},
+                                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } }),
+            ],
+        )
+        .await;
+        assert_eq!(out[0]["error"]["code"], -32602);
+        assert!(out[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("remove"));
+        assert_eq!(
+            out[1]["result"]["isError"], false,
+            "session must survive: {:?}",
             out[1]
         );
     }
