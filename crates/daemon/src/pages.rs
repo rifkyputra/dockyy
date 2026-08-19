@@ -58,17 +58,30 @@ pub(crate) fn wants_html(headers: &HeaderMap) -> bool {
         .is_some_and(|a| a.contains("text/html"))
 }
 
-/// The `status`/`status-*` modifier `kuadrat.css` defines one colour for
-/// (running, stopped, failed). Derived from the label text in one place so the
-/// app list and the app detail page, which both show a `WorkloadState` label,
-/// cannot pick different colours for the same word.
-fn status_class(label: &str) -> &'static str {
-    match label {
-        "Running" => "status status-running",
-        "Stopped" | "Not installed" => "status status-stopped",
-        "Failed" => "status status-failed",
-        _ => "status",
-    }
+/// A workload state as a pill — dot + word, never color alone. Derived from
+/// the label text in one place so the app list and the app detail page, which
+/// both show a `WorkloadState` label, cannot pick different colours for the
+/// same word. (`pill`, not `badge`: "badge" contains the adblock-bait
+/// substring "ad".)
+fn status_pill(label: &str) -> Markup {
+    let class = match label {
+        "Running" => "pill pill-ok",
+        "Failed" => "pill pill-err",
+        "Stopped" | "Not installed" => "pill pill-off",
+        _ => "pill",
+    };
+    html! { span class=(class) { (label) } }
+}
+
+/// A deploy's status as a pill, from the store's own status strings.
+fn deploy_status_pill(status: &str) -> Markup {
+    let class = match status {
+        "done" => "pill pill-ok",
+        "failed" => "pill pill-err",
+        "rolled_back" => "pill pill-warn",
+        _ => "pill",
+    };
+    html! { span class=(class) { (status) } }
 }
 
 /// Deploys shown on an app's page. Fixed by the design document rather than
@@ -113,16 +126,22 @@ fn layout(title: &str, body: Markup) -> Markup {
 pub async fn index(State(st): State<AppState>) -> Markup {
     let configs = st.store.list_app_configs().unwrap_or_default();
 
+    let empty = configs.is_empty();
     let body = html! {
         h1 { "Apps" }
-        @if configs.is_empty() {
-            p { "No apps registered yet." }
+        @if empty {
+            div class="empty" {
+                span class="mark" {}
+                p class="lede" { "No apps yet" }
+                p { "Register a repo below, then deploy it with "
+                    code { "kuadrat deploy <app> <path>" } "." }
+            }
         } @else {
             table id="apps" {
                 thead {
                     tr {
                         th { "Name" }
-                        th { "Repo" }
+                        th class="col-repo" { "Repo" }
                         th { "Route" }
                         th { "Status" }
                     }
@@ -131,23 +150,28 @@ pub async fn index(State(st): State<AppState>) -> Markup {
                     @for config in configs {
                         @let summary = summarise(&st, config).await;
                         tr {
-                            td { a href={ "/app/" (path_segment(&summary.name)) } { (summary.name) } }
-                            td { (summary.repo_path) }
+                            td { a class="mono" href={ "/app/" (path_segment(&summary.name)) } { (summary.name) } }
+                            td class="col-repo mono muted" { (summary.repo_path) }
                             td {
                                 @if let Some(route) = &summary.route {
-                                    (route.domain)
+                                    span class="chip" { (route.domain) }
                                 } @else {
-                                    "—"
+                                    span class="muted" { "—" }
                                 }
                             }
-                            td class=(status_class(&summary.status)) { (summary.status) }
+                            td { (status_pill(&summary.status)) }
                         }
                     }
                 }
             }
         }
 
-        (registration_form(None))
+        details id="register-panel" class="panel" open[empty] {
+            summary { "Register an app" }
+            div class="panel-body" {
+                (registration_form(None))
+            }
+        }
     };
 
     layout("apps", body)
@@ -159,7 +183,6 @@ pub async fn index(State(st): State<AppState>) -> Markup {
 /// they were already looking at, not as a bare status code.
 fn registration_form(error: Option<&str>) -> Markup {
     html! {
-        h2 { "Register an app" }
         @if let Some(reason) = error {
             p id="register-error" { (reason) }
         }
@@ -180,7 +203,11 @@ fn registration_form(error: Option<&str>) -> Markup {
 /// `POST /apps`'s error page: the registration form, re-rendered with the
 /// rejection reason, wrapped in the shared layout.
 pub(crate) fn registration_page(error: Option<&str>) -> Markup {
-    layout("register", registration_form(error))
+    let body = html! {
+        h1 { "Register an app" }
+        (registration_form(error))
+    };
+    layout("register", body)
 }
 
 /// The Follow control's own state, carried in the URL rather than in any
@@ -282,10 +309,14 @@ pub(crate) async fn app_detail(
     };
 
     let body = html! {
-        h1 { (config.name) }
-        dl id="app-facts" {
-            dt { "Status" }
-            dd class=(status_class(status_label)) { (status_label) }
+        div class="page-head" {
+            h1 { (config.name) }
+            (status_pill(status_label))
+            form id="redeploy" method="post" action={ "/api/apps/" (path_segment(&config.name)) "/deploy" } {
+                button type="submit" { "Redeploy" }
+            }
+        }
+        dl id="app-facts" class="facts" {
             dt { "Repo" }
             dd { (config.repo_path) }
             dt { "Route" }
@@ -293,7 +324,7 @@ pub(crate) async fn app_detail(
                 @if let Some(route) = &config.route {
                     (route.domain) ":" (route.port)
                 } @else {
-                    "—"
+                    span class="muted" { "—" }
                 }
             }
             dt { "Image" }
@@ -301,18 +332,14 @@ pub(crate) async fn app_detail(
                 @if let Some(image) = &image {
                     (image)
                 } @else {
-                    "—"
+                    span class="muted" { "—" }
                 }
             }
         }
 
-        form id="redeploy" method="post" action={ "/api/apps/" (path_segment(&config.name)) "/deploy" } {
-            button type="submit" { "Redeploy" }
-        }
-
         h2 { "Recent deploys" }
         @if deploys.is_empty() {
-            p { "No deploys yet." }
+            p class="muted" { "No deploys yet." }
         } @else {
             table id="deploy-history" {
                 thead {
@@ -326,14 +353,14 @@ pub(crate) async fn app_detail(
                 tbody {
                     @for d in &deploys {
                         tr {
-                            td { a href={ "/deploy/" (d.id) } { (d.id) } }
+                            td { a class="mono" href={ "/deploy/" (d.id) } { (d.id) } }
                             td { (d.stage.as_str()) }
-                            td { (d.status.as_str()) }
+                            td { (deploy_status_pill(d.status.as_str())) }
                             td {
                                 @if let Some(detail) = &d.detail {
-                                    (detail)
+                                    span class="muted" { (detail) }
                                 } @else {
-                                    "—"
+                                    span class="muted" { "—" }
                                 }
                             }
                         }
@@ -343,11 +370,17 @@ pub(crate) async fn app_detail(
         }
 
         h2 { "Log" }
-        (log_section)
-        @if following {
-            a class="log-follow" href={ "/app/" (path_segment(&config.name)) } { "Stop following" }
-        } @else {
-            a class="log-follow" href={ "/app/" (path_segment(&config.name)) "?follow=1" } { "Follow" }
+        div class="console" {
+            div class="console-head" {
+                @if following {
+                    span { "journal — following" }
+                    a class="log-follow" href={ "/app/" (path_segment(&config.name)) } { "Stop following" }
+                } @else {
+                    span { "journal — last " (LOG_LINES) " lines" }
+                    a class="log-follow" href={ "/app/" (path_segment(&config.name)) "?follow=1" } { "Follow" }
+                }
+            }
+            div class="console-body" { (log_section) }
         }
     };
 
@@ -405,13 +438,22 @@ pub(crate) async fn app_log_stream(
 /// hits that will blame the stream, not this function.
 fn event_row(ev: &StoredEvent) -> Markup {
     let (stage, status) = ev.event.kind.columns();
+    // The rail marker's color, from the status the row already spells out in
+    // words — never color alone. Stage statuses and the terminal deploy
+    // statuses share this map because they share the column.
+    let marker = match status {
+        "succeeded" | "done" => "deploy-event ev-ok",
+        "failed" => "deploy-event ev-err",
+        "rolled_back" => "deploy-event ev-warn",
+        _ => "deploy-event",
+    };
     html! {
-        li class="deploy-event" {
+        li class=(marker) {
             span class="event-stage" { (stage) }
             " "
             span class="event-status" { (status) }
             @if let Some(detail) = &ev.event.detail {
-                " — " (detail)
+                " " span class="event-detail" { "— " (detail) }
             }
         }
     }
@@ -442,9 +484,15 @@ fn deploy_page(row: &DeployRow, events: &[StoredEvent], live: bool) -> Markup {
     let last_id = events.last().map_or(0, |ev| ev.id);
     let connect = live.then(|| format!("/deploy/{}/stream?resume={last_id}", row.id));
     html! {
-        h1 { "Deploy " (row.id) " — " (row.app) }
-        p { "Status: " (row.status.as_str()) }
+        div class="page-head" {
+            h1 { "Deploy " (row.id) " — " (row.app) }
+            (deploy_status_pill(row.status.as_str()))
+            @if live {
+                span class="pill pill-ok" { "live" }
+            }
+        }
         ul #timeline
+            aria-live=[live.then_some("polite")]
             hx-ext=[live.then_some("sse")]
             sse-connect=[connect.as_deref()]
             sse-swap=[live.then_some("message")]
@@ -969,5 +1017,69 @@ mod tests {
             !body.contains("sse-connect"),
             "a stream must not be attached over an unreadable journal: {body}"
         );
+    }
+
+    /// Progressive disclosure: the registration panel is open exactly when
+    /// there is nothing else on the page to look at.
+    #[tokio::test]
+    async fn the_register_panel_is_open_only_when_the_list_is_empty() {
+        let (app, store, _hub, _d) = harness_parts();
+        let body = body_text(app.clone().oneshot(get("/")).await.expect("send")).await;
+        assert!(body.contains(r#"id="register-panel""#), "{body}");
+        assert!(
+            body.contains("open"),
+            "empty store must open the panel: {body}"
+        );
+
+        register(&store, "web");
+        let body = body_text(app.oneshot(get("/")).await.expect("send")).await;
+        let panel = body.split(r#"id="register-panel""#).nth(1).expect("panel");
+        let attrs = &panel[..panel.find('>').expect("tag end")];
+        assert!(
+            !attrs.contains("open"),
+            "a populated list keeps it closed: {attrs}"
+        );
+    }
+
+    /// Every log state renders inside the console card — an empty console is
+    /// still a console.
+    #[tokio::test]
+    async fn the_log_section_lives_inside_the_console_card() {
+        let (app, store, _hub, _d) = harness_with_journal(vec![]);
+        register(&store, "web");
+        let body = body_text(app.oneshot(get("/app/web")).await.expect("send")).await;
+        let console = body
+            .split(r#"class="console""#)
+            .nth(1)
+            .expect("console card");
+        assert!(console.contains(r#"id="log-empty""#), "{body}");
+    }
+
+    /// The timeline is a polite live region only while the deploy is live —
+    /// a finished timeline must not announce itself.
+    #[tokio::test]
+    async fn the_timeline_is_a_live_region_only_while_live() {
+        let (app, store, _hub, _d) = harness_parts();
+        let live_id = store.create_deploy("web").expect("create");
+        let body = body_text(
+            app.clone()
+                .oneshot(get(&format!("/deploy/{live_id}")))
+                .await
+                .expect("send"),
+        )
+        .await;
+        assert!(body.contains("aria-live"), "{body}");
+
+        let done_id = store.create_deploy("web").expect("create");
+        store
+            .finish_deploy(done_id, DeployStatus::Done, None)
+            .expect("finish");
+        let body = body_text(
+            app.oneshot(get(&format!("/deploy/{done_id}")))
+                .await
+                .expect("send"),
+        )
+        .await;
+        assert!(!body.contains("aria-live"), "{body}");
     }
 }
