@@ -4,12 +4,13 @@
 
 Take a git repo to a running service with TLS — on systemd, without a container daemon.
 
-> Status: **pre-alpha**. Phases 1 through 3 are merged — the CLI can build, deploy, route, hold
-> secrets, roll back, and recover from a crash, and `kuadrat serve` runs a daemon with a web UI for
-> status, live deploy progress, logs, and an optional webhook on terminal outcomes and stage
-> failures. `packaging/kuadrat.service` runs it under systemd. The daemon binds loopback only, with
-> no authentication — reach it remotely over an SSH tunnel or a VPN. There is no MCP surface yet.
-> See the [Guide](#guide) to use it today.
+> Status: **pre-alpha**. Phases 1 through 7 are merged — the CLI builds, deploys, routes, holds
+> secrets, rolls back, and recovers from a crash; `kuadrat serve` runs a daemon with a designed
+> operator console (dark/light, live deploy progress, live log following), signed GitHub/GitLab
+> push-to-deploy hooks, and an outbound webhook; specs can declare scheduled tasks on systemd
+> timers; and `kuadrat mcp` gives an agent six tools over stdio. `packaging/kuadrat.service`
+> runs the daemon under systemd. It binds loopback only, with no authentication — reach it
+> remotely over an SSH tunnel or a VPN. See the [Guide](#guide) to use it today.
 
 ## Why
 
@@ -68,7 +69,9 @@ kuadrat deploy pbrain
   automatic TLS, healthcheck, roll back on failure
 - **Secrets** — `podman secret` management; specs carry names, never values
 - **Logs** — journald reads scoped to a unit, streamable live as JSON for an API client
-- **Web UI** — status, live deploy progress, logs, live log following
+- **Web UI** — an operator console: fleet status at a glance, live deploy timelines, a real log
+  console with live following, dark and light, keyboard-accessible — one plain stylesheet, no
+  build step, no framework
 - **Push to deploy** — a `git push` to GitHub or GitLab redeploys the app through a signed
   webhook; a failed hook lands in the deploy timeline, not a void
 - **Scheduled tasks** — spec-declared commands on systemd timers, each run a fresh container

@@ -309,7 +309,7 @@ pub(crate) async fn app_detail(
     };
 
     let body = html! {
-        div class="page-head" {
+        div class="page-bar" {
             h1 { (config.name) }
             (status_pill(status_label))
             form id="redeploy" method="post" action={ "/api/apps/" (path_segment(&config.name)) "/deploy" } {
@@ -371,7 +371,7 @@ pub(crate) async fn app_detail(
 
         h2 { "Log" }
         div class="console" {
-            div class="console-head" {
+            div class="console-top" {
                 @if following {
                     span { "journal — following" }
                     a class="log-follow" href={ "/app/" (path_segment(&config.name)) } { "Stop following" }
@@ -484,7 +484,7 @@ fn deploy_page(row: &DeployRow, events: &[StoredEvent], live: bool) -> Markup {
     let last_id = events.last().map_or(0, |ev| ev.id);
     let connect = live.then(|| format!("/deploy/{}/stream?resume={last_id}", row.id));
     html! {
-        div class="page-head" {
+        div class="page-bar" {
             h1 { "Deploy " (row.id) " — " (row.app) }
             (deploy_status_pill(row.status.as_str()))
             @if live {

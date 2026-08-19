@@ -334,7 +334,7 @@ tbody tr:hover {
 }
 
 /* Page headers: h1 + status pill on one line, actions on the right. */
-.page-head {
+.page-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -342,11 +342,11 @@ tbody tr:hover {
   margin-bottom: 24px;
 }
 
-.page-head h1 {
+.page-bar h1 {
   margin: 0;
 }
 
-.page-head form {
+.page-bar form {
   margin-left: auto;
 }
 
@@ -360,7 +360,7 @@ tbody tr:hover {
   margin-block: 12px;
 }
 
-.console-head {
+.console-top {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -370,7 +370,7 @@ tbody tr:hover {
   font-size: 12px;
 }
 
-.console-head .log-follow {
+.console-top .log-follow {
   margin-left: auto;
 }
 
