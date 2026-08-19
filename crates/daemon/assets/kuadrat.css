@@ -1,33 +1,87 @@
-/* kuadrat — operator UI stylesheet.
+/* kuadrat — operator console stylesheet.
  *
- * This is a loopback-only operator tool, not a product surface: no build
- * step, no preprocessor, no framework. Plain CSS, meant to be read top to
- * bottom.
+ * A loopback-only operator tool, not a product surface: no build step, no
+ * preprocessor, no framework. Plain CSS, readable top to bottom.
+ *
+ * The system (docs/design/2026-08-19-phase-7-web-ui.md): dark-first,
+ * near-monochrome graphite tinted toward one teal accent, depth from
+ * luminance steps + 1px low-opacity borders, machine values in mono,
+ * spacing on the 4/8/12/16/24/32/48 scale, radius family 4/6px (kuadrat
+ * means "squared" — corners stay tight). Naming rule: no adblock-bait
+ * substrings in classes — which is why these are `pill` and `busy`, never
+ * `badge` or `loading` (both contain "ad").
  */
 
+/* ---------------------------------------------------------------- tokens */
+
 :root {
-  --fg: #1b1f23;
-  --bg: #ffffff;
-  --muted: #6a737d;
-  --border: #d7dbe0;
-  --accent: #0969da;
-  --running: #1a7f37;
-  --stopped: #6a737d;
-  --failed: #cf222e;
+  color-scheme: dark light;
+
+  /* primitives — graphite ramp, cool-tinted toward the accent hue */
+  --g-950: #0a0e11;
+  --g-900: #10151a;
+  --g-850: #151c22;
+  --g-800: #1c242c;
+  --g-700: #2a343d;
+  --g-600: #46535e;
+  --g-500: #64737f;
+  --g-300: #a3b0ba;
+  --g-100: #e6ecf1;
+  --teal-300: #4cc4d4;
+  --teal-500: #35b5c6;
+  --teal-900: #082a30;
+
+  /* semantic — components reference only these */
+  --surface: var(--g-900);
+  --surface-raised: var(--g-850);
+  --surface-hover: var(--g-800);
+  --surface-sunken: var(--g-950);
+  --text-primary: var(--g-100);
+  --text-secondary: var(--g-300);
+  --text-tertiary: var(--g-500);
+  --border-subtle: var(--g-800);
+  --border-strong: var(--g-700);
+  --accent: var(--teal-300);
+  --accent-solid: var(--teal-500);
+  --on-accent: var(--teal-900);
+
+  /* states — always paired with a word, never color alone */
+  --ok: #4ac26b;
+  --err: #f47067;
+  --warn: #d9a63a;
+  --off: #8b98a5;
+
+  /* the console is dark in both themes — a terminal is dark */
+  --console-bg: #0b1013;
+  --console-text: #ccd6dd;
+  --console-muted: #64737f;
+
+  --radius-control: 4px;
+  --radius-card: 6px;
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --fg: #e6edf3;
-    --bg: #0d1117;
-    --muted: #8b949e;
-    --border: #30363d;
-    --accent: #58a6ff;
-    --running: #3fb950;
-    --stopped: #8b949e;
-    --failed: #f85149;
+    --surface: #f6f8f9;
+    --surface-raised: #ffffff;
+    --surface-hover: #eaeff2;
+    --surface-sunken: #eceff2;
+    --text-primary: #16222b;
+    --text-secondary: #495864;
+    --text-tertiary: #67767f;
+    --border-subtle: #dbe2e7;
+    --border-strong: #bfcad2;
+    --accent: #0c7d8e;
+    --accent-solid: #0e8496;
+    --on-accent: #ffffff;
+    --ok: #157f3c;
+    --err: #c93a44;
+    --warn: #8a6100;
+    --off: #5d6c77;
   }
 }
+
+/* ------------------------------------------------------------------ base */
 
 * {
   box-sizing: border-box;
@@ -35,33 +89,299 @@
 
 body {
   margin: 0;
-  padding: 1.5rem;
-  max-width: 72rem;
-  margin-inline: auto;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-  font-size: 15px;
+    Arial, sans-serif;
+  font-size: 14px;
   line-height: 1.5;
-  color: var(--fg);
-  background: var(--bg);
+  color: var(--text-primary);
+  background: var(--surface);
 }
 
-h1, h2, h3 {
+h1,
+h2,
+h3 {
   line-height: 1.25;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 21px;
+  margin: 0 0 16px;
+}
+
+h2 {
+  font-size: 16px;
+  margin: 48px 0 12px;
 }
 
 a {
   color: var(--accent);
+  text-decoration: none;
 }
 
-code, pre {
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+code,
+pre,
+.mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.9em;
+  font-size: 13px;
 }
 
-/* The follow view replaces <pre id="log-tail"> with <ul class="log-tail">
-   for the same journal; without this it inherits the body's proportional
-   font and default list bullets instead of reading as the same tail. */
+.muted {
+  color: var(--text-tertiary);
+}
+
+/* ----------------------------------------------------------------- shell */
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  z-index: 10;
+}
+
+.skip-link:focus-visible {
+  left: 8px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-raised);
+}
+
+.topbar .home {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* The mark: kuadrat = squared. A square, drawn, never an emoji. */
+.mark {
+  width: 12px;
+  height: 12px;
+  background: var(--accent-solid);
+  border-radius: 2px;
+}
+
+.topbar .version {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+main {
+  max-width: 1200px;
+  margin-inline: auto;
+  padding: 24px;
+}
+
+/* ---------------------------------------------------------------- tables */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-block: 12px 24px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  /* border-radius needs a clipping context on a table */
+  overflow: hidden;
+  display: table;
+}
+
+caption {
+  text-align: left;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: top;
+}
+
+thead th {
+  color: var(--text-tertiary);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr {
+  transition: background-color 150ms ease-out;
+}
+
+tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+/* ----------------------------------------------------------------- pills */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-control);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  white-space: nowrap;
+}
+
+.pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentcolor;
+}
+
+.pill-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.pill-err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.pill-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.pill-off {
+  color: var(--off);
+}
+
+/* Route chips: a domain is a destination, styled like the link it is. */
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--surface-raised);
+}
+
+/* ------------------------------------------------------------ fact grid */
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 24px;
+  margin: 0 0 24px;
+}
+
+.facts dt {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-top: 2px;
+}
+
+.facts dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* Page headers: h1 + status pill on one line, actions on the right. */
+.page-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.page-head h1 {
+  margin: 0;
+}
+
+.page-head form {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------- console */
+
+.console {
+  background: var(--console-bg);
+  color: var(--console-text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  margin-block: 12px;
+}
+
+.console-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--console-muted) 30%, transparent);
+  color: var(--console-muted);
+  font-size: 12px;
+}
+
+.console-head .log-follow {
+  margin-left: auto;
+}
+
+.console-body {
+  max-height: 480px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.console pre,
+.console .log-tail {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .log-tail {
   list-style: none;
   padding-left: 0;
@@ -69,55 +389,230 @@ code, pre {
 
 .log-line {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.9em;
+  font-size: 13px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-table {
+.console #log-empty,
+.console #log-error {
+  margin: 0;
+  color: var(--console-muted);
+  font-size: 13px;
+}
+
+.console #log-error {
+  color: var(--err);
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- timeline */
+
+#timeline {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  border-left: 2px solid var(--border-strong);
+}
+
+.deploy-event {
+  position: relative;
+  padding: 4px 0 4px 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The marker: a square on the rail, colored by the row's status class. */
+.deploy-event::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 11px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--off);
+}
+
+.deploy-event.ev-ok::before {
+  background: var(--ok);
+}
+
+.deploy-event.ev-err::before {
+  background: var(--err);
+}
+
+.deploy-event.ev-warn::before {
+  background: var(--warn);
+}
+
+.event-stage {
+  font-weight: 600;
+}
+
+.event-status {
+  color: var(--text-secondary);
+}
+
+.event-detail {
+  color: var(--text-tertiary);
+}
+
+/* ----------------------------------------------------------------- forms */
+
+form div {
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+input[type="text"] {
   width: 100%;
-  border-collapse: collapse;
-  margin-block: 1rem;
+  max-width: 480px;
+  padding: 8px 12px;
+  font-size: 16px; /* prevents iOS zoom */
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
 }
 
-caption {
-  text-align: left;
-  color: var(--muted);
-  margin-bottom: 0.5rem;
+input[type="text"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
 }
 
-th, td {
-  text-align: left;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-}
-
-thead th {
-  color: var(--muted);
+button {
+  padding: 8px 16px;
+  font-size: 14px;
   font-weight: 600;
-  border-bottom: 2px solid var(--border);
+  color: var(--on-accent);
+  background: var(--accent-solid);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: filter 150ms ease-out, transform 150ms ease-out;
 }
 
-tbody tr:hover {
-  background: color-mix(in srgb, var(--border) 30%, transparent);
+button:hover {
+  filter: brightness(1.1);
 }
 
-.status {
+button:active {
+  transform: scale(0.98);
+}
+
+#register-error {
+  color: var(--err);
+}
+
+/* The registration panel: progressive disclosure. */
+.panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--surface-raised);
+  margin-block: 24px;
+}
+
+.panel > summary {
+  padding: 12px 16px;
+  cursor: pointer;
   font-weight: 600;
+  list-style: none;
 }
 
-.status-running {
-  color: var(--running);
+.panel > summary::before {
+  content: "▸ ";
+  color: var(--text-tertiary);
 }
 
-.status-stopped {
-  color: var(--stopped);
+.panel[open] > summary::before {
+  content: "▾ ";
 }
 
-.status-failed {
-  color: var(--failed);
+.panel-body {
+  padding: 0 16px 16px;
 }
 
-.muted {
-  color: var(--muted);
+/* ----------------------------------------------------------- empty state */
+
+.empty {
+  text-align: left;
+  padding: 48px 0 24px;
+  color: var(--text-secondary);
+}
+
+.empty .mark {
+  width: 16px;
+  height: 16px;
+  margin-bottom: 12px;
+}
+
+.empty p {
+  margin: 4px 0;
+}
+
+.empty .lede {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------- motion */
+
+/* New rows arriving over SSE enter with an opacity-only fade. */
+[sse-swap] > * {
+  animation: row-in 180ms ease-out;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ------------------------------------------------------------ responsive */
+
+@media (max-width: 640px) {
+  main {
+    padding: 16px;
+  }
+
+  .topbar {
+    padding: 12px 16px;
+  }
+
+  /* The repo column is mono detail the phone doesn't have room for. */
+  .col-repo {
+    display: none;
+  }
+
+  .facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .facts dt {
+    margin-top: 8px;
+  }
 }
