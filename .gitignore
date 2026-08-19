@@ -5,3 +5,8 @@
 
 # Whitepaper working directory
 .whitepaper/
+
+# Per-host TLS material — private keys must never reach a remote
+*.crt
+*.key
+*.pem
