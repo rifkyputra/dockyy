@@ -93,8 +93,12 @@ fn layout(title: &str, body: Markup) -> Markup {
                 script src="/assets/sse.min.js" {}
             }
             body {
-                header { a href="/" { "kuadrat" } }
-                main { (body) }
+                a class="skip-link" href="#content" { "Skip to content" }
+                header class="topbar" {
+                    a class="home" href="/" { span class="mark" {} "kuadrat" }
+                    span class="version" { "v" (env!("CARGO_PKG_VERSION")) }
+                }
+                main id="content" { (body) }
             }
         }
     }
