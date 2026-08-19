@@ -24,7 +24,7 @@
   --g-800: #1c242c;
   --g-700: #2a343d;
   --g-600: #46535e;
-  --g-500: #64737f;
+  --g-500: #758490;
   --g-300: #a3b0ba;
   --g-100: #e6ecf1;
   --teal-300: #4cc4d4;
@@ -54,7 +54,9 @@
   /* the console is dark in both themes — a terminal is dark */
   --console-bg: #0b1013;
   --console-text: #ccd6dd;
-  --console-muted: #64737f;
+  --console-muted: #7f8f9a;
+
+  --border-input: #566470;
 
   --radius-control: 4px;
   --radius-card: 6px;
@@ -68,11 +70,12 @@
     --surface-sunken: #eceff2;
     --text-primary: #16222b;
     --text-secondary: #495864;
-    --text-tertiary: #67767f;
+    --text-tertiary: #5f6e77;
     --border-subtle: #dbe2e7;
     --border-strong: #bfcad2;
+    --border-input: #7d8c96;
     --accent: #0c7d8e;
-    --accent-solid: #0e8496;
+    --accent-solid: #0d7280;
     --on-accent: #ffffff;
     --ok: #157f3c;
     --err: #c93a44;
@@ -176,8 +179,11 @@ pre,
   text-decoration: none;
 }
 
-/* The mark: kuadrat = squared. A square, drawn, never an emoji. */
+/* The mark: kuadrat = squared. A square, drawn, never an emoji.
+   inline-block: a bare span collapses its width/height otherwise (the
+   topbar's copy only worked because flex blockifies its items). */
 .mark {
+  display: inline-block;
   width: 12px;
   height: 12px;
   background: var(--accent-solid);
@@ -421,7 +427,7 @@ pre {
 
 .deploy-event {
   position: relative;
-  padding: 4px 0 4px 20px;
+  padding: 6px 0 6px 20px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -430,7 +436,7 @@ pre {
   content: "";
   position: absolute;
   left: -5px;
-  top: 11px;
+  top: 13px;
   width: 8px;
   height: 8px;
   border-radius: 2px;
@@ -482,7 +488,9 @@ input[type="text"] {
   font-size: 16px; /* prevents iOS zoom */
   color: var(--text-primary);
   background: var(--surface-sunken);
-  border: 1px solid var(--border-strong);
+  /* --border-input, not --border-strong: an input's boundary is a UI
+     component and needs 3:1 (WCAG 1.4.11); decorative hairlines do not. */
+  border: 1px solid var(--border-input);
   border-radius: var(--radius-control);
 }
 
@@ -600,6 +608,13 @@ button:active {
 
   .topbar {
     padding: 12px 16px;
+  }
+
+  /* A table wider than the phone scrolls inside itself; the page never
+     scrolls sideways. */
+  table {
+    display: block;
+    overflow-x: auto;
   }
 
   /* The repo column is mono detail the phone doesn't have room for. */
